@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -16,13 +18,29 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QRadioButton,
     QVBoxLayout,
     QWidget,
 )
 
-from mkhybrid_gui.audio_cd import AudioRipWorker
-from mkhybrid_gui.disk_utils import DiskUtilError, MediaType, Volume, list_volumes
+from mkhybrid_gui.audio_cd import AudioFormat, AudioRipWorker, missing_tools
+from mkhybrid_gui.disk_utils import (
+    DiskUtilError,
+    MediaType,
+    Volume,
+    list_volumes,
+    whole_disk_raw_device,
+)
 from mkhybrid_gui.iso_builder import IsoOptions, IsoWorker
+
+# ALACを先頭（既定・推奨）にした表示順
+_AUDIO_FORMAT_ORDER = [
+    AudioFormat.ALAC,
+    AudioFormat.AIFF,
+    AudioFormat.FLAC,
+    AudioFormat.WAV,
+    AudioFormat.AAC,
+]
 
 
 class MainWindow(QMainWindow):
@@ -31,11 +49,12 @@ class MainWindow(QMainWindow):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("mkhybrid-gui — ハイブリッドISO作成ツール")
-        self.resize(640, 480)
+        self.resize(640, 560)
 
         self._volumes: list[Volume] = []
         self._worker: IsoWorker | AudioRipWorker | None = None
         self._is_audio_job = False
+        self._audio_work_tmpdir: tempfile.TemporaryDirectory[str] | None = None
 
         self._build_ui()
         self._refresh_volumes()
@@ -82,6 +101,28 @@ class MainWindow(QMainWindow):
         self.options_label = QLabel("オプション:")
         form.addRow(self.options_label, options_row)
 
+        audio_format_row = QHBoxLayout()
+        self.audio_format_group = QButtonGroup(self)
+        self._audio_format_buttons: dict[AudioFormat, QRadioButton] = {}
+        for audio_format in _AUDIO_FORMAT_ORDER:
+            label = audio_format.value
+            if audio_format is AudioFormat.ALAC:
+                label += " ← 推奨"
+            radio = QRadioButton(label)
+            self.audio_format_group.addButton(radio)
+            audio_format_row.addWidget(radio)
+            self._audio_format_buttons[audio_format] = radio
+        self._audio_format_buttons[AudioFormat.ALAC].setChecked(True)
+        audio_format_row.addStretch(1)
+        self.audio_format_label = QLabel("書き出し形式:")
+        form.addRow(self.audio_format_label, audio_format_row)
+
+        self.verify_checkbox = QCheckBox(
+            "厳密な検証（各トラックを複数回読み取り比較。時間は約2倍）"
+        )
+        self.verify_checkbox.setChecked(True)
+        form.addRow(self.verify_checkbox)
+
         self.media_info_label = QLabel("")
         root_layout.addWidget(self.media_info_label)
 
@@ -123,6 +164,10 @@ class MainWindow(QMainWindow):
         self.joliet_checkbox.setVisible(not is_audio)
         self.rock_checkbox.setVisible(not is_audio)
         self.udf_checkbox.setVisible(not is_audio)
+        self.audio_format_label.setVisible(is_audio)
+        for radio in self._audio_format_buttons.values():
+            radio.setVisible(is_audio)
+        self.verify_checkbox.setVisible(is_audio)
         self.start_button.setText(
             "オーディオトラックを書き出す" if is_audio else "ISOイメージを作成"
         )
@@ -152,6 +197,12 @@ class MainWindow(QMainWindow):
 
         if path:
             self.output_edit.setText(path)
+
+    def _selected_audio_format(self) -> AudioFormat:
+        for audio_format, radio in self._audio_format_buttons.items():
+            if radio.isChecked():
+                return audio_format
+        return AudioFormat.ALAC
 
     # -- 実行 ---------------------------------------------------------
 
@@ -215,6 +266,18 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "入力エラー", "出力先フォルダを指定してください。")
             return
 
+        audio_format = self._selected_audio_format()
+        missing = missing_tools(audio_format)
+        if missing:
+            tools = " ".join(missing)
+            QMessageBox.critical(
+                self,
+                "外部ツールが不足しています",
+                f"{audio_format.value} の書き出しには次のコマンドが必要です: {tools}\n\n"
+                f"Homebrewでインストールしてください:\n  brew install {tools}",
+            )
+            return
+
         dest_path = Path(dest_text)
         if dest_path.exists() and any(dest_path.iterdir()):
             reply = QMessageBox.question(
@@ -231,7 +294,17 @@ class MainWindow(QMainWindow):
         self.status_label.setText("オーディオトラックを書き出しています…")
         self._set_controls_enabled(False)
 
-        worker = AudioRipWorker(volume.mount_point, dest_path, parent=self)
+        self._audio_work_tmpdir = tempfile.TemporaryDirectory(prefix="mkhybrid-gui-rip-")
+        device = whole_disk_raw_device(volume.device_identifier)
+
+        worker = AudioRipWorker(
+            device,
+            dest_path,
+            audio_format,
+            self._audio_work_tmpdir.name,
+            verify=self.verify_checkbox.isChecked(),
+            parent=self,
+        )
         worker.progress.connect(self._on_progress)
         worker.finished_ok.connect(self._on_finished)
         self._worker = worker
@@ -246,6 +319,9 @@ class MainWindow(QMainWindow):
         self.joliet_checkbox.setEnabled(enabled)
         self.rock_checkbox.setEnabled(enabled)
         self.udf_checkbox.setEnabled(enabled)
+        for radio in self._audio_format_buttons.values():
+            radio.setEnabled(enabled)
+        self.verify_checkbox.setEnabled(enabled)
 
     def _on_progress(self, line: str) -> None:
         self.log_view.appendPlainText(line)
@@ -266,3 +342,7 @@ class MainWindow(QMainWindow):
                 "対応できません。専用ツールの利用をご検討ください。",
             )
         self._worker = None
+
+        if self._is_audio_job and self._audio_work_tmpdir is not None:
+            self._audio_work_tmpdir.cleanup()
+            self._audio_work_tmpdir = None

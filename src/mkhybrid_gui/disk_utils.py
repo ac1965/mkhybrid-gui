@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import dataclasses
 import plistlib
+import re
 import subprocess
 from dataclasses import dataclass
 from enum import Enum
@@ -14,6 +15,20 @@ from enum import Enum
 
 class DiskUtilError(RuntimeError):
     """``diskutil`` コマンドの実行に失敗した場合に送出する。"""
+
+
+_PARTITION_SUFFIX_RE = re.compile(r"s\d+$")
+
+
+def whole_disk_raw_device(device_identifier: str) -> str:
+    """パーティション識別子（例: ``disk5s1``）から、ディスク全体の生デバイス
+    パス（例: ``/dev/rdisk5``）を求める。
+
+    ``cdparanoia`` 等、光学ドライブへ直接アクセスするツールは特定パーティション
+    ではなくディスク全体の生デバイスを要求するため、この変換が必要になる。
+    """
+    whole_disk = _PARTITION_SUFFIX_RE.sub("", device_identifier)
+    return f"/dev/r{whole_disk}"
 
 
 class MediaType(str, Enum):

@@ -13,7 +13,20 @@ from mkhybrid_gui.disk_utils import (
     detect_media_type,
     list_volumes,
     parse_diskutil_list,
+    whole_disk_raw_device,
 )
+
+
+def test_whole_disk_raw_device_strips_partition_suffix() -> None:
+    assert whole_disk_raw_device("disk5s1") == "/dev/rdisk5"
+
+
+def test_whole_disk_raw_device_handles_whole_disk_already() -> None:
+    assert whole_disk_raw_device("disk5") == "/dev/rdisk5"
+
+
+def test_whole_disk_raw_device_handles_multi_digit_partition() -> None:
+    assert whole_disk_raw_device("disk12s3") == "/dev/rdisk12"
 
 SAMPLE_DISKUTIL_LIST = {
     "AllDisks": ["disk0", "disk0s1", "disk2", "disk2s0"],

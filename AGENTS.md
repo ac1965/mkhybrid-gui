@@ -8,8 +8,9 @@
 - **目的**: macOSに接続した光学ドライブの内容を、`hdiutil makehybrid` を用いて Windows/Linux 双方で読み取り可能なハイブリッドISOイメージに変換するGUIツールを提供する。
 - **対応メディア**: データCD / 音楽CD（Audio CD） / DVD / Blu-ray（BD）。BDXL（大容量BD）・M-DISC（アーカイブ用メディア）は、OS上は通常のBD-R/BD-REと同じファイルシステムでマウントされるため、追加のメディア種別分岐は不要（[disk_utils.py](src/mkhybrid_gui/disk_utils.py) の `detect_media_type` はサイズベースの判定でこれらを自然にカバーする）。
   - データCD/DVD/BD: `hdiutil makehybrid` でISOイメージ化（ISO9660 + Joliet + Rock Ridge、DVD/BDでは大容量ファイル対応のUDFを追加可能）。
-  - 音楽CD: macOSがCDDAFSで各トラックを再生可能なAIFFファイルとしてマウントする仕組みを利用し、[audio_cd.py](src/mkhybrid_gui/audio_cd.py) がそれらをフォルダへコピーする。ビット単位で完全なRed Book CDイメージ（BIN/CUE等）の作成は対象外（外部ツール依存を避けるため）。
+  - 音楽CD: [audio_cd.py](src/mkhybrid_gui/audio_cd.py) が `cdparanoia`（誤り訂正・再読込付きの正確なリッピング）でWAVを取得し、`afconvert`（ALAC/AIFF/AAC）または `flac`（FLAC）でユーザー選択の形式に変換する。WAVはそのまま採用する。macOS標準のCDDAFSマウント（単純なAIFFコピー）は誤り訂正・検証ができないため使用しない。
 - **対象OS**: macOS専用（`hdiutil` / `diskutil` はmacOS標準コマンドに依存するため、Windows/Linuxでは動作しない）。
+- **追加の外部依存（Homebrew）**: `cdparanoia`（音楽CDの正確なリッピングに必須）、`flac`（FLAC書き出し時のみ必須）。これらはmacOS標準コマンドではないため、利用者に `brew install cdparanoia flac` の実行を求める。ISOイメージ作成（データCD/DVD/BD）はこれらに依存しない。
 - **想定ユーザー**: 社内配布用メディアの作成を行う非エンジニアも含む担当者。CLIを意識させず、GUIから完結させる。
 
 ## 技術スタック
@@ -30,7 +31,7 @@
           self.finished_ok.emit(proc.wait() == 0)
   ```
 
-- **外部コマンド呼び出し**: `subprocess`（`diskutil list`, `diskutil info`, `hdiutil makehybrid`, `hdiutil verify`）。音楽CDのトラック書き出しは外部コマンドではなく、CDDAFSマウントポイントからの `shutil` ファイルコピーで行う。
+- **外部コマンド呼び出し**: `subprocess`（macOS標準: `diskutil list`, `diskutil info`, `hdiutil makehybrid`, `hdiutil verify`、`afconvert`。Homebrew依存: `cdparanoia`, `flac`）。使用前に `shutil.which` で有無を確認し、不足時はインストール方法（`brew install ...`）をGUIに明示する（`audio_cd.missing_tools`）。
 - **パッケージング**: `PyInstaller` を用いて `.app` バンドルを生成する（Qtプラグインの取りこぼしを避けるため `py2app` ではなくこちらを採用。配布時はコード署名なしのadhoc署名で可）。`plugins/platforms`（`libqcocoa.dylib`等）が正しく同梱されるかをビルド手順で確認する。
 - **UI構成**: レイアウトは `QVBoxLayout`/`QHBoxLayout`/`QFormLayout` 等で構成する。必要に応じてQt Designerの`.ui`ファイル＋`pyside6-uic`変換によるコード分離運用も選択可とする。
 
@@ -47,7 +48,7 @@
 │       ├── app.py              # エントリポイント / GUI起動
 │       ├── disk_utils.py       # diskutil list/info のパース、メディア種別（MediaType）判定
 │       ├── iso_builder.py      # hdiutil makehybrid / verify のラッパー、IsoWorker(QThread)
-│       ├── audio_cd.py         # 音楽CD（CDDAFS）のトラック書き出し、AudioRipWorker(QThread)
+│       ├── audio_cd.py         # cdparanoiaによる正確なリッピング、afconvert/flacでの形式変換、AudioRipWorker(QThread)
 │       └── ui/
 │           └── main_window.py  # PySide6ウィジェット定義（メディア種別に応じてUIを切替）
 ├── tests/
@@ -60,6 +61,9 @@
 ## セットアップ・実行コマンド
 
 ```bash
+# 音楽CDの正確なリッピング・FLAC書き出しに必要（データCD/DVD/BDのISO作成には不要）
+brew install cdparanoia flac
+
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt   # PySide6 を含む
@@ -102,16 +106,21 @@ make distclean  # clean に加えて .venv も削除
    ```
    - `-rock` はデフォルトでON、詳細オプション（Jolietのみ等）はGUI上のチェックボックスで切り替え可能にする。
    - `-udf` はDVD/BD（BDXL・M-DISCを含む）選択時にデフォルトON（ISO9660の4GBファイルサイズ上限を回避するため）、CD選択時はデフォルトOFF。ユーザーは任意に変更できる。
-3. **音楽CDの書き出し**: `MediaType.CD_AUDIO` を選択した場合、ISO作成UIの代わりに出力先フォルダ選択に切り替え、CDDAFSマウントポイント配下の `*.aiff` トラックを `audio_cd.extract_audio_tracks` でフォルダへコピーする（`AudioRipWorker`）。
+3. **音楽CDの正確なリッピング**: `MediaType.CD_AUDIO` を選択した場合、ISO作成UIの代わりに出力先フォルダ選択・書き出し形式（ALAC/AIFF/FLAC/WAV/AAC、既定はALAC）・検証チェックボックスに切り替える。以下の3要件を満たすこと。
+   1. **正確な読み取り**: `cdparanoia` をパラノイアモード（`-Z` を指定しない）で実行し、ジッター補正・C2エラー利用を有効にする。
+   2. **誤り訂正・再読込**: 上記はcdparanoia自体が内部で行う（再実装しない）。
+   3. **検証**: 1トラックを独立して複数回（既定2回、不一致なら最大3回まで）リッピングし、WAVのSHA-256チェックサムが一致することを確認する（`audio_cd.rip_track_verified`）。一致しなければ最後の読み取りを「未検証」として採用し、完了メッセージで警告する。
+   - 取得したWAVは `afconvert`（ALAC/AIFF/AAC）または `flac`（FLAC）でユーザー選択の形式に変換する（`audio_cd.convert_audio`）。WAV選択時は変換不要でそのまま採用する。
+   - 実行前に `audio_cd.missing_tools` で必要な外部コマンドの有無を確認し、不足時は `brew install ...` の案内を表示して処理を開始しない。
 4. **進捗表示**: `IsoWorker` / `AudioRipWorker`（いずれも `QThread`）で非同期実行し、`progress` シグナルでメインスレッドのUIを更新する。処理中はGUIをブロックしないこと。
-5. **検証**: ISOイメージ作成後に `hdiutil verify <出力先.iso>` を自動実行し、結果をGUIに表示する（音楽CDの書き出しには対応する検証コマンドがないため、コピー成否のみ報告する）。
+5. **検証（ISO）**: ISOイメージ作成後に `hdiutil verify <出力先.iso>` を自動実行し、結果をGUIに表示する。
 6. **エラーハンドリング**: コピーガード付きメディア等でセクタ単位読み取りが必要なケースを検出できない場合は、明確なエラーメッセージを表示し、対処法（別ツールの利用など）を案内する。
 
 ## テスト
 
 - `disk_utils.py` のパース処理・メディア種別判定（`detect_media_type`）は `diskutil list -plist` / `diskutil info -plist` のサンプル出力を固定データとして用意し、ユニットテストでカバーする。
 - `iso_builder.py` は実際のCD-ROMを使わず、`subprocess.run`/`subprocess.Popen` をモック化してコマンド組み立て・実行結果処理のみを検証する。
-- `audio_cd.py` は実際の音楽CDを使わず、CDDAFSマウントを模した一時ディレクトリ（`.aiff`ファイル）でトラック検出・コピー処理を検証する。
+- `audio_cd.py` は実際の音楽CD・cdparanoia/afconvert/flacバイナリを使わず、`subprocess.run`/`subprocess.Popen` をモック化してトラック数解析・コマンド組み立て・検証ロジック（複数回読み取りの一致判定）・変換処理を検証する。
 - GUI部分のテストには `pytest-qt`（`qtbot`）を用いる。
 - 実機（実CD-ROM/DVD/BD/音楽CD）を使った結合テストはCI対象外とし、手動確認手順をREADMEに記載する。
 
@@ -120,8 +129,10 @@ make distclean  # clean に加えて .venv も削除
 - Windows/Linux上での動作を前提にしたコード分岐を追加しない（本ツールはmacOS専用）。
 - `hdiutil`/`diskutil` の出力形式変更に備え、テキストパースではなく `-plist` 出力（`plistlib`でパース）を優先する。
 - ユーザーの許可なくディスクのアンマウント・イジェクトを自動実行しない（GUI上で明示的な確認ダイアログを挟むこと）。
-- 音楽CDのビット単位完全複製（Red Book CDイメージ、BIN/CUE等）のために `cdrdao`/`xorriso` 等のmacOS標準外の外部コマンドを依存として追加しない（AIFFトラック書き出しのみをスコープとする）。
 - BDXL・M-DISCを専用のメディア種別として個別分岐しない（通常のBD/DVDと同じ経路で処理できるため、サイズベースの判定に任せる）。
+- `cdparanoia` に `-Z`（パラノイア無効化）を指定しない。誤り訂正・再読込を無効化してしまい「正確なリッピング」の要件を満たせなくなる。
+- 音楽CDのトラック書き出しをCDDAFSマウント経由の単純なファイルコピーに戻さない（誤り訂正・検証ができず、過去の実装がまさにこの理由で置き換えられた）。
+- `cdparanoia`/`flac` が見つからない場合に、フォーマット変換をサイレントにスキップしたり、CDDAFSコピー等の低精度な代替手段に自動フォールバックしたりしない。GUI上で明確にエラー表示し、`brew install` を案内すること。
 
 ## コミット/PR規約
 
