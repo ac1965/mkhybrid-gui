@@ -1,17 +1,57 @@
-"""``diskutil list -plist`` の実行・パースを行うモジュール。
+"""``diskutil`` の実行・パース、光学メディア種別の判定を行うモジュール。
 
 UIフレームワーク（PySide6）には依存せず、単体でテスト可能な設計とする。
 """
 
 from __future__ import annotations
 
+import dataclasses
 import plistlib
 import subprocess
 from dataclasses import dataclass
+from enum import Enum
 
 
 class DiskUtilError(RuntimeError):
     """``diskutil`` コマンドの実行に失敗した場合に送出する。"""
+
+
+class MediaType(str, Enum):
+    """光学メディアの種別。"""
+
+    CD_DATA = "データCD"
+    CD_AUDIO = "音楽CD"
+    DVD = "DVD"
+    BD = "Blu-ray (BD/BDXL/M-DISC)"
+
+
+# 判定用のサイズ閾値（バイト）。実際の規格上限より少し余裕を持たせてある。
+_CD_MAX_BYTES = 1_000_000_000  # 約900MB CDメディア相当
+_DVD_MAX_BYTES = 10_000_000_000  # 約9.4GB 二層DVDメディア相当
+
+
+def detect_media_type(volume: Volume, filesystem_type: str | None) -> MediaType:
+    """ボリュームのファイルシステム種別・サイズからメディア種別を推定する。
+
+    BDXL・M-DISCは、OSからは通常のBD-R/BD-REと同じファイルシステムでマウントされ
+    ソフトウェア的な区別がないため、このサイズベースの判定がそのまま適用できる
+    （容量が大きいだけの通常のBlu-rayとして ``MediaType.BD`` に分類される）。
+    """
+    fs = (filesystem_type or "").lower()
+
+    if fs == "cddafs":
+        return MediaType.CD_AUDIO
+    if fs == "cd9660":
+        return MediaType.CD_DATA if volume.size <= _CD_MAX_BYTES else MediaType.DVD
+    if fs == "udf":
+        return MediaType.DVD if volume.size <= _DVD_MAX_BYTES else MediaType.BD
+
+    # ファイルシステム情報が取得できない場合はサイズのみから推定する
+    if volume.size <= _CD_MAX_BYTES:
+        return MediaType.CD_DATA
+    if volume.size <= _DVD_MAX_BYTES:
+        return MediaType.DVD
+    return MediaType.BD
 
 
 @dataclass(frozen=True)
@@ -23,6 +63,8 @@ class Volume:
     mount_point: str | None
     size: int
     content: str | None
+    filesystem_type: str | None = None
+    media_type: MediaType | None = None
 
     @property
     def is_mounted(self) -> bool:
@@ -31,13 +73,16 @@ class Volume:
     @property
     def display_name(self) -> str:
         name = self.volume_name or "(名称未設定)"
-        return f"{name} — /dev/{self.device_identifier}"
+        prefix = f"[{self.media_type.value}] " if self.media_type is not None else ""
+        return f"{prefix}{name} — /dev/{self.device_identifier}"
 
 
 def parse_diskutil_list(plist_data: bytes) -> list[Volume]:
     """``diskutil list -plist`` の出力（bytes）をパースし、Volumeの一覧を返す。
 
     固定データを渡せるため、実機のディスクなしにユニットテスト可能。
+    メディア種別（``media_type``）はここでは判定しない
+    （``diskutil info`` の追加呼び出しが必要なため、``list_volumes`` 側で行う）。
     """
     try:
         root = plistlib.loads(plist_data)
@@ -73,8 +118,28 @@ def _volume_from_entry(entry: dict) -> Volume:
     )
 
 
+def get_filesystem_type(device_identifier: str) -> str | None:
+    """``diskutil info -plist <device>`` から ``FilesystemType`` を取得する。
+
+    取得できない場合（コマンド失敗・解析失敗）は ``None`` を返し、
+    呼び出し側（``detect_media_type``）でサイズベースの推定にフォールバックする。
+    """
+    result = subprocess.run(
+        ["diskutil", "info", "-plist", f"/dev/{device_identifier}"],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        info = plistlib.loads(result.stdout)
+    except Exception:  # noqa: BLE001 - 解析失敗時はNone扱いにする
+        return None
+    return info.get("FilesystemType")
+
+
 def list_volumes(*, mounted_only: bool = True) -> list[Volume]:
-    """``diskutil list -plist`` を実行し、Volumeの一覧を返す。
+    """``diskutil list -plist`` を実行し、メディア種別を付与したVolumeの一覧を返す。
 
     Parameters
     ----------
@@ -94,4 +159,10 @@ def list_volumes(*, mounted_only: bool = True) -> list[Volume]:
     volumes = parse_diskutil_list(result.stdout)
     if mounted_only:
         volumes = [v for v in volumes if v.is_mounted]
-    return volumes
+    return [_with_media_type(v) for v in volumes]
+
+
+def _with_media_type(volume: Volume) -> Volume:
+    filesystem_type = get_filesystem_type(volume.device_identifier)
+    media_type = detect_media_type(volume, filesystem_type)
+    return dataclasses.replace(volume, filesystem_type=filesystem_type, media_type=media_type)

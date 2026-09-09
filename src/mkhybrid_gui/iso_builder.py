@@ -16,10 +16,16 @@ ProgressCallback = Callable[[str], None]
 
 @dataclass(frozen=True)
 class IsoOptions:
-    """イメージ作成オプション。"""
+    """イメージ作成オプション。
 
+    ``udf`` はDVD/Blu-ray（BDXL・M-DISCを含む）の大容量メディアで、
+    ISO9660の4GBファイルサイズ上限を回避するために使用する。
+    """
+
+    iso: bool = True
     joliet: bool = True
     rock: bool = True
+    udf: bool = False
 
 
 @dataclass(frozen=True)
@@ -45,15 +51,22 @@ def build_makehybrid_command(
     （``shell=True`` は使用しない）。
     """
     options = options or IsoOptions()
-    if not options.joliet and not options.rock:
-        raise ValueError("Joliet / Rock Ridge のいずれかは有効にしてください。")
 
-    cmd: list[str] = ["hdiutil", "makehybrid", "-iso"]
+    flags: list[str] = []
+    if options.iso:
+        flags.append("-iso")
     if options.joliet:
-        cmd.append("-joliet")
+        flags.append("-joliet")
     if options.rock:
-        cmd.append("-rock")
-    cmd.extend(["-o", str(output_path), str(source)])
+        flags.append("-rock")
+    if options.udf:
+        flags.append("-udf")
+    if not flags:
+        raise ValueError(
+            "ISO9660 / Joliet / Rock Ridge / UDF のいずれかは有効にしてください。"
+        )
+
+    cmd: list[str] = ["hdiutil", "makehybrid", *flags, "-o", str(output_path), str(source)]
     return cmd
 
 

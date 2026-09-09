@@ -42,10 +42,40 @@ def test_build_makehybrid_command_joliet_only() -> None:
     assert "-joliet" in cmd
 
 
+def test_build_makehybrid_command_joliet_and_rock_off_keeps_plain_iso() -> None:
+    # -iso はデフォルトで有効なため、Joliet/Rockを両方OFFにしても
+    # 素のISO9660イメージとして有効なコマンドになる。
+    cmd = build_makehybrid_command(
+        "/Volumes/SAMPLE_CD", "/tmp/out.iso", IsoOptions(joliet=False, rock=False)
+    )
+
+    assert cmd == ["hdiutil", "makehybrid", "-iso", "-o", "/tmp/out.iso", "/Volumes/SAMPLE_CD"]
+
+
+def test_build_makehybrid_command_udf_for_dvd_bd() -> None:
+    cmd = build_makehybrid_command(
+        "/Volumes/SAMPLE_DVD", "/tmp/out.iso", IsoOptions(udf=True)
+    )
+
+    assert cmd == [
+        "hdiutil",
+        "makehybrid",
+        "-iso",
+        "-joliet",
+        "-rock",
+        "-udf",
+        "-o",
+        "/tmp/out.iso",
+        "/Volumes/SAMPLE_DVD",
+    ]
+
+
 def test_build_makehybrid_command_rejects_no_format() -> None:
     with pytest.raises(ValueError):
         build_makehybrid_command(
-            "/Volumes/SAMPLE_CD", "/tmp/out.iso", IsoOptions(joliet=False, rock=False)
+            "/Volumes/SAMPLE_CD",
+            "/tmp/out.iso",
+            IsoOptions(iso=False, joliet=False, rock=False, udf=False),
         )
 
 
