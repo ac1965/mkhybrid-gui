@@ -6,6 +6,7 @@ GUIからの非同期実行のみ ``IsoWorker``（QThread）が担う。
 
 from __future__ import annotations
 
+import hashlib
 import plistlib
 import re
 import subprocess
@@ -129,8 +130,8 @@ def _extract_attached_device(output: str) -> str | None:
     return None
 
 
-def _device_filesystem_type(device: str) -> str | None:
-    """``diskutil info -plist`` からアタッチ済みデバイスのFilesystemTypeを取得する。"""
+def _device_info(device: str) -> dict | None:
+    """``diskutil info -plist`` からアタッチ済みデバイスの情報を取得する。"""
     result = subprocess.run(
         ["diskutil", "info", "-plist", device],
         capture_output=True,
@@ -145,11 +146,111 @@ def _device_filesystem_type(device: str) -> str | None:
     except Exception:  # noqa: BLE001
         return None
 
-    if not isinstance(info, dict):
+    return info if isinstance(info, dict) else None
+
+
+#: 比較対象から除外するmacOS由来のメタデータファイル/ディレクトリ名。
+_IGNORED_NAMES = frozenset(
+    {
+        ".DS_Store",
+        ".Trashes",
+        ".Spotlight-V100",
+        ".fseventsd",
+        ".TemporaryItems",
+    }
+)
+
+
+def _file_paths(root: Path) -> dict[str, Path]:
+    """``root`` 以下の通常ファイルを、相対パス文字列→絶対パスの辞書として返す。"""
+    files: dict[str, Path] = {}
+
+    for path in root.rglob("*"):
+        if any(part in _IGNORED_NAMES for part in path.parts):
+            continue
+
+        try:
+            if not path.is_file():
+                continue
+        except OSError:
+            continue
+
+        files[str(path.relative_to(root))] = path
+
+    return files
+
+
+def _sha256_of_file(path: Path) -> str | None:
+    digest = hashlib.sha256()
+
+    try:
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
         return None
 
-    filesystem_type = info.get("FilesystemType")
-    return filesystem_type if isinstance(filesystem_type, str) else None
+    return digest.hexdigest()
+
+
+def compare_contents(source_root: Path, target_root: Path) -> list[str]:
+    """2つのディレクトリツリーの内容を比較する。
+
+    ``hdiutil verify`` がチェックサム非対応のため使えず、
+    ``diskutil verifyVolume`` もISO9660/Jolietのみのイメージには対応
+    しない（実機確認済み）ことを受けて、生成したISOイメージを実際に
+    attachし、元のソース（ディスクのマウントポイント等）とファイル
+    一覧・内容を比較することで、切り詰め・欠損・同一サイズのまま
+    内容だけ壊れているケース等の実害あるコピーミスを検出する。
+
+    まずファイルサイズを比較し（安価で、切り詰め等の大半はこれで
+    検出できる）、サイズが一致するファイルについてのみSHA-256
+    ハッシュも比較する（同一サイズで内容だけ異なるケースの検出）。
+    実際のCD/DVDサイズのデータで試したところ、この方式は数秒程度で
+    完了する（バイト単位の全比較でも実用上十分な速度）。
+
+    不一致が無ければ空リストを返す。
+    """
+    source_files = _file_paths(source_root)
+    target_files = _file_paths(target_root)
+
+    problems: list[str] = []
+
+    for name in sorted(set(source_files) - set(target_files)):
+        problems.append(f"元にあってISOに無い: {name}")
+
+    for name in sorted(set(target_files) - set(source_files)):
+        problems.append(f"ISOにあって元に無い: {name}")
+
+    for name in sorted(set(source_files) & set(target_files)):
+        source_path = source_files[name]
+        target_path = target_files[name]
+
+        try:
+            source_size = source_path.stat().st_size
+            target_size = target_path.stat().st_size
+        except OSError:
+            problems.append(f"読み取りエラー: {name}")
+            continue
+
+        if source_size != target_size:
+            problems.append(
+                f"サイズ不一致: {name}"
+                f"（元 {source_size} バイト / ISO {target_size} バイト）"
+            )
+            continue
+
+        source_hash = _sha256_of_file(source_path)
+        target_hash = _sha256_of_file(target_path)
+
+        if (
+            source_hash is None
+            or target_hash is None
+            or source_hash != target_hash
+        ):
+            problems.append(f"内容不一致: {name}")
+
+    return problems
 
 
 def run_makehybrid(
@@ -182,6 +283,7 @@ def run_makehybrid(
 
 def verify_iso(
     image_path: str | Path,
+    source: str | Path | None = None,
     on_progress: ProgressCallback | None = None,
     on_percent: ProgressPercentCallback | None = None,
     on_process_started: ProcessStartedCallback | None = None,
@@ -199,7 +301,7 @@ def verify_iso(
     そのため、次の手順に置き換える。
     1. ``hdiutil attach -readonly`` でイメージを実際にattach（マウント）
        できるか確認する。
-    2. マウントされたファイルシステムが ``udf`` の場合のみ、
+    2. マウントされたファイルシステムが ``udf`` の場合、
        ``diskutil verifyVolume``（内部的に ``fsck_udf``）で
        ファイルシステムの整合性を検証する。実機で、意図的に
        truncateした壊れたイメージに対して ``Bad extent in file`` /
@@ -207,8 +309,14 @@ def verify_iso(
     3. UDFを含まない（ISO9660/Jolietのみの）イメージについては、
        macOS側に対応するファイルシステム検証ツールが存在せず
        ``diskutil verifyVolume`` は常に ``"Invalid request"`` で
-       失敗する（実機確認済み）。この場合はattachできたことのみを
-       もって検証成功とみなす。
+       失敗する（実機確認済み）。この場合、``source``（元の
+       ディスクのマウントポイント等）が実在するディレクトリであれば、
+       ``compare_contents()`` でattach後のマウントポイントと
+       ファイル一覧・サイズを比較し、切り詰め・欠損を検出する
+       （データCD等、UDFを付けない既定設定の場合に実質何も
+       検証していなかった問題への対処）。``source`` が渡されない、
+       またはディレクトリとして存在しない場合は、従来通りattach
+       できたことのみをもって検証成功とみなす。
     4. 検証後は必ずdetachする。
     """
     attach_result = _run_streaming(
@@ -238,7 +346,9 @@ def verify_iso(
         )
 
     try:
-        filesystem_type = _device_filesystem_type(device)
+        info = _device_info(device)
+        filesystem_type = info.get("FilesystemType") if info else None
+        mount_point = info.get("MountPoint") if info else None
 
         if filesystem_type == "udf":
             verify_result = _run_streaming(
@@ -246,6 +356,37 @@ def verify_iso(
                 on_progress=on_progress,
                 on_process_started=on_process_started,
             )
+        elif (
+            source is not None
+            and mount_point
+            and Path(source).is_dir()
+        ):
+            if on_progress is not None:
+                on_progress(
+                    "ISO9660/Jolietのみのイメージのため、元のファイルと"
+                    "内容（一覧・サイズ）を比較して検証します…"
+                )
+
+            problems = compare_contents(Path(source), Path(mount_point))
+
+            if problems:
+                shown = problems[:20]
+                remainder = len(problems) - len(shown)
+                detail = "; ".join(shown)
+                if remainder > 0:
+                    detail += f"（他{remainder}件）"
+
+                verify_result = CommandResult(
+                    returncode=1,
+                    stderr=(
+                        f"作成したISOの内容が元と一致しません: {detail}"
+                    ),
+                )
+            else:
+                if on_progress is not None:
+                    on_progress("元のファイルと内容が一致しました。")
+
+                verify_result = CommandResult(returncode=0, stderr="")
         else:
             if on_progress is not None:
                 on_progress(
@@ -428,6 +569,7 @@ if QThread is not None:
 
             verify_result = verify_iso(
                 self._output_path,
+                source=self._source,
                 on_progress=self.progress.emit,
                 on_process_started=self._capture_process,
             )

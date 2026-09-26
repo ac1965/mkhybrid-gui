@@ -134,7 +134,9 @@ make distclean  # clean に加えて .venv も削除
 5. **検証（ISO）**: ISOイメージ作成後、`iso_builder.verify_iso()` が以下の手順で検証する（**`hdiutil verify` は使用しない**）。検証中の出力も（完了を待たず）その場でGUIへストリーミング表示すること（`subprocess.run` で完了まで待ってからまとめて表示する実装に戻さない）。
    - **`hdiutil verify` を使わない理由（実機確認済み）**: `hdiutil makehybrid` が生成するISOイメージにはチェックサムが一切含まれない（`hdiutil imageinfo` で `Checksummed: false` / `Checksum Type: なし` を確認済み）。そのため `hdiutil verify` は、内容が正しい正常なISOイメージに対しても**必ず** `"has no checksum"` で失敗する。
    - 代わりに、`hdiutil attach -readonly` でイメージを実際にattachし、マウントされたファイルシステムが `udf` の場合のみ `diskutil verifyVolume`（内部的に `fsck_udf` を使用）でファイルシステムの整合性を検証する。意図的にtruncateした壊れたISOに対して `Bad extent in file` / `Filesystem is dirty` を正しく検出できることを実機で確認済み。
-   - UDFを含まない（ISO9660/Jolietのみの）イメージについては、macOS側に対応するファイルシステム検証ツールが存在せず、`diskutil verifyVolume` は常に `"Invalid request (-69886)"` で失敗する（実機確認済み）。この場合はattachできたことのみをもって検証成功とみなす（深いファイルシステム検証は行えない、既知の制限としてREADMEに記載）。
+   - UDFを含まない（ISO9660/Jolietのみの）イメージについては、macOS側に対応するファイルシステム検証ツールが存在せず、`diskutil verifyVolume` は常に `"Invalid request (-69886)"` で失敗する（実機確認済み）。CD選択時はUDFが既定OFFのため、これが最も一般的なケースになる。
+     - `source`（`IsoWorker`に渡されたISO作成元、通常は元ディスクのマウントポイント）が実在するディレクトリの場合、`iso_builder.compare_contents()` で、attach後のマウントポイントと元のディレクトリのファイル一覧・内容を比較する（`MainWindow`は必ず`source`を渡すこと。渡し忘れると検証が実質何もしないattach確認のみに後退する、実機で発見された回帰）。まずファイルサイズを比較し、サイズが一致するファイルについてのみSHA-256ハッシュも比較する（同一サイズのまま内容だけ壊れているケースも検出できることを実機で確認済み）。不一致があれば検証失敗として報告する。
+     - `source` が渡されない、またはディレクトリとして存在しない場合にのみ、従来通りattachできたことのみをもって検証成功とみなす（後方互換のフォールバック）。
    - 検証後は成功・失敗によらず必ず `hdiutil detach` でデタッチする。
 6. **エラーハンドリング**: コピーガード付きメディア等でセクタ単位読み取りが必要なケースを検出できない場合は、明確なエラーメッセージを表示し、対処法（別ツールの利用など）を案内する。
 7. **安全な中断**: 実行中のISO作成・音楽CDリッピングは、GUI上の「中断」ボタンから中断できること。中断時は実行中の外部コマンドへ `terminate`（SIGTERM）を送り、作成途中の一時ファイル（WAV・部分的なISO等）を削除してから完了通知を出す（`IsoWorker.request_cancel` / `AudioRipWorker.request_cancel`、`audio_cd.RipCancelled`）。また、処理中はウィンドウを閉じられないようにし（`MainWindow.closeEvent`）、実行中のバックグラウンドスレッドを残したままアプリが終了しないようにすること。
@@ -172,6 +174,7 @@ make distclean  # clean に加えて .venv も削除
 - `audio_cd._effective_path()` を「`PATH`が空の場合だけログインシェルを問い合わせる」実装に戻さない。GUI起動時も`PATH`は非空（launchdの最小値）になるため、その条件では常にHomebrewのコマンドが見つからなくなる。
 - `iso_builder.verify_iso()` を `subprocess.run`（完了を待ってから出力をまとめて渡す方式）に戻さない。検証中のGUI進捗表示が完了までフリーズしたように見える回帰になる。
 - `iso_builder.verify_iso()` を `hdiutil verify` ベースの実装に戻さない。`hdiutil makehybrid` が生成するイメージにはチェックサムが一切含まれないため（実機確認済み）、`hdiutil verify` は正常なISOイメージに対しても必ず失敗し、ISO作成が実際には成功しているのに毎回「失敗」と誤報告する重大な回帰になる。
+- `IsoWorker.run()` から `verify_iso()` への `source=self._source` の受け渡しを削除しない。UDFを含まない（ISO9660/Jolietのみの、CD選択時の既定）イメージでは、`source` が無いと検証が「attachできたことのみ確認」まで後退し、切り詰め・内容破損があっても検出できなくなる（実機での報告により発見・修正済みの回帰）。
 - 実行中のワーカースレッド（`IsoWorker`/`AudioRipWorker`）を残したままウィンドウを閉じられるようにしない（`MainWindow.closeEvent` のガードを外さない）。
 - `disk_utils.detect_media_type()` を、`filesystem_type` が既知の非光学ファイルシステム（`apfs`/`hfs+`/`exfat` 等）と判明している場合にもサイズだけでCD/DVD/BDと判定するように戻さない。サイズベースの推定フォールバックは `filesystem_type is None`（＝真に判別材料がない場合）に限ること。これを怠ると、内蔵の起動ディスク（Macintosh HD等）がGUIのドライブ選択肢に「Blu-ray」「データCD」等として表示され、誤って選択できてしまう（実機のMacで実際に再現・修正済みの回帰）。
 - MusicBrainzへの問い合わせ（`musicbrainz.lookup_releases`）を、ユーザーの明示的なボタン操作なしに自動実行しない（デバイス選択時やアプリ起動時に暗黙で通信を発生させない）。

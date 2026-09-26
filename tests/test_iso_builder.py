@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import plistlib
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +17,7 @@ from mkhybrid_gui.iso_builder import (
     build_detach_command,
     build_makehybrid_command,
     build_verify_volume_command,
+    compare_contents,
     run_makehybrid,
     verify_iso,
 )
@@ -205,14 +207,17 @@ class _FakeCompletedProcess:
         self.returncode = returncode
 
 
-def _fake_diskutil_info_run(filesystem_type: str | None):
+def _fake_diskutil_info_run(
+    filesystem_type: str | None, mount_point: str | None = None
+):
     """``diskutil info -plist <device>`` をフェイクする ``subprocess.run``。"""
 
     def fake_run(cmd, **kwargs):
         assert cmd[:2] == ["diskutil", "info"]
-        return _FakeCompletedProcess(
-            plistlib.dumps({"FilesystemType": filesystem_type})
-        )
+        info = {"FilesystemType": filesystem_type}
+        if mount_point is not None:
+            info["MountPoint"] = mount_point
+        return _FakeCompletedProcess(plistlib.dumps(info))
 
     return fake_run
 
@@ -334,6 +339,200 @@ def test_verify_iso_iso9660_only_skips_verify_volume(
 
     assert result.ok is True
     # diskutil verifyVolumeは呼ばれない。
+    assert ["diskutil", "verifyVolume"] not in [
+        cmd[:2] for cmd in commands
+    ]
+    assert any("検証には対応していません" in line for line in lines)
+
+
+# --- ファイル一覧・サイズ比較（UDFなしイメージの実質的な検証） -------------
+
+
+def test_compare_contents_matching_trees_returns_no_problems(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    (source / "sub").mkdir(parents=True)
+    (target / "sub").mkdir(parents=True)
+
+    (source / "a.txt").write_bytes(b"hello")
+    (target / "a.txt").write_bytes(b"hello")
+    (source / "sub" / "b.txt").write_bytes(b"world!")
+    (target / "sub" / "b.txt").write_bytes(b"world!")
+
+    assert compare_contents(source, target) == []
+
+
+def test_compare_contents_detects_missing_file(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+
+    (source / "a.txt").write_bytes(b"hello")
+    (source / "b.txt").write_bytes(b"missing-from-target")
+
+    problems = compare_contents(source, target)
+
+    assert any("b.txt" in p and "元にあってISOに無い" in p for p in problems)
+
+
+def test_compare_contents_detects_extra_file(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+
+    (target / "unexpected.txt").write_bytes(b"surprise")
+
+    problems = compare_contents(source, target)
+
+    assert any(
+        "unexpected.txt" in p and "ISOにあって元に無い" in p
+        for p in problems
+    )
+
+
+def test_compare_contents_detects_size_mismatch_truncation(
+    tmp_path: Path,
+) -> None:
+    """切り詰められた（truncateされた）ファイルをサイズ不一致として検出する。"""
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+
+    (source / "big.bin").write_bytes(b"x" * 1000)
+    (target / "big.bin").write_bytes(b"x" * 10)  # 切り詰められた状態を模す
+
+    problems = compare_contents(source, target)
+
+    assert any(
+        "big.bin" in p and "サイズ不一致" in p for p in problems
+    )
+
+
+def test_compare_contents_ignores_macos_metadata_files(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+
+    (source / ".DS_Store").write_bytes(b"finder-metadata")
+    (target / ".DS_Store").write_bytes(b"different-finder-metadata")
+
+    assert compare_contents(source, target) == []
+
+
+def test_verify_iso_iso9660_only_compares_contents_when_source_provided(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """UDFなしイメージでも、sourceが実在するディレクトリなら
+    attach後のマウントポイントと内容を比較して検証する。
+    """
+    source = tmp_path / "source"
+    mounted = tmp_path / "mounted"
+    source.mkdir()
+    mounted.mkdir()
+    (source / "file.txt").write_bytes(b"content")
+    (mounted / "file.txt").write_bytes(b"content")
+
+    fake_popen, commands = _make_multi_step_popen(
+        {
+            "attach": {
+                "returncode": 0,
+                "lines": [f"/dev/disk5          \t\t{mounted}\n"],
+            },
+            "detach": {"returncode": 0, "lines": []},
+        }
+    )
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _fake_diskutil_info_run("cd9660", mount_point=str(mounted)),
+    )
+
+    lines: list[str] = []
+    result = verify_iso(
+        "/tmp/out.iso", source=str(source), on_progress=lines.append
+    )
+
+    assert result.ok is True
+    assert ["diskutil", "verifyVolume"] not in [
+        cmd[:2] for cmd in commands
+    ]
+    assert any("一致しました" in line for line in lines)
+
+
+def test_verify_iso_iso9660_only_detects_truncated_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """元のファイルより短く切り詰められたコピーを検証失敗として検出する。"""
+    source = tmp_path / "source"
+    mounted = tmp_path / "mounted"
+    source.mkdir()
+    mounted.mkdir()
+    (source / "file.bin").write_bytes(b"x" * 1000)
+    (mounted / "file.bin").write_bytes(b"x" * 10)
+
+    fake_popen, _commands = _make_multi_step_popen(
+        {
+            "attach": {
+                "returncode": 0,
+                "lines": [f"/dev/disk5          \t\t{mounted}\n"],
+            },
+            "detach": {"returncode": 0, "lines": []},
+        }
+    )
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _fake_diskutil_info_run("cd9660", mount_point=str(mounted)),
+    )
+
+    result = verify_iso("/tmp/out.iso", source=str(source))
+
+    assert result.ok is False
+    assert "file.bin" in result.stderr
+    assert "一致しません" in result.stderr
+
+
+def test_verify_iso_iso9660_only_falls_back_without_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """sourceを渡さない場合は、従来通りattachできたことのみで成功とみなす
+    （呼び出し元が更新されていない場合の後方互換性）。
+    """
+    fake_popen, commands = _make_multi_step_popen(
+        {
+            "attach": {
+                "returncode": 0,
+                "lines": ["/dev/disk5          \t\t/Volumes/SAMPLE\n"],
+            },
+            "detach": {"returncode": 0, "lines": []},
+        }
+    )
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        _fake_diskutil_info_run("cd9660", mount_point="/Volumes/SAMPLE"),
+    )
+
+    lines: list[str] = []
+    result = verify_iso("/tmp/out.iso", on_progress=lines.append)
+
+    assert result.ok is True
     assert ["diskutil", "verifyVolume"] not in [
         cmd[:2] for cmd in commands
     ]
