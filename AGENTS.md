@@ -128,6 +128,7 @@ make distclean  # clean に加えて .venv も削除
    3. **検証**: 1トラックを独立して複数回（既定2回、不一致なら最大3回まで）リッピングし、WAVのSHA-256チェックサムが一致することを確認する（`audio_cd.rip_track_verified`）。一致しなければ最後の読み取りを「未検証」として採用し、完了メッセージで警告する。
    - 取得したWAVは `afconvert`（ALAC/AIFF/AAC）または `flac`（FLAC）でユーザー選択の形式に変換する（`audio_cd.convert_audio`）。WAV選択時は変換不要でそのまま採用する。
    - 実行前に `audio_cd.missing_tools` で必要な外部コマンドの有無を確認し、不足時は `brew install ...` の案内を表示して処理を開始しない。
+   - `cd-paranoia` の出力に含まれる `"Option not supported by drive"`（ドライブが一部の拡張コマンド・オプション機能に対応していないという診断メッセージで、リッピング自体には影響しない）は、ログにはそのまま表示しつつ、初回出現時にのみ「エラーではない」旨の補足を1行添えること（`MainWindow._on_progress`）。実機での報告により、説明なしではエラーだと誤解されやすいことが判明した。
 4. **進捗表示**: `IsoWorker` / `AudioRipWorker`（いずれも `QThread`）で非同期実行し、`progress` シグナルでメインスレッドのUIを更新する。処理中はGUIをブロックしないこと。
    - `hdiutil makehybrid` は実際には進捗率を出力しないため、ISO作成フェーズの進捗バーは不確定（ビジー）表示のままにし、検証フェーズ開始・完了時のみ確定値（90%/100%）へ切り替える（実進捗率が得られたと偽装しない）。
    - 音楽CDのリッピングは、トラック単位（現在のトラック番号／総トラック数）の粗い進捗率を `progress_percent` シグナルで通知する。
@@ -150,6 +151,7 @@ make distclean  # clean に加えて .venv も削除
    - `config.get_config()` は既定パス（環境変数 `XDG_CACHE_HOME`（未設定時は `~/.cache`）配下の `mkhybrid/config.toml`。環境変数 `MKHYBRID_GUI_CONFIG` でパス自体を上書き可）から読み込み、`config.save_config()` は同じパスへTOMLとして書き戻す（`config.to_toml_string()` が手書きのシリアライザ。標準ライブラリの `tomllib` は読み込み専用のため）。設定はXDG的には本来 `XDG_CONFIG_HOME` に置くのがより適切だが、本プロジェクトの要件により `XDG_CACHE_HOME` 配下を使用する（`config.default_config_path()`）。
    - GUIはメイン画面（`MainWindow`）を `QTabWidget` で「ISO作成 / 音楽CD」タブと「設定」タブの2タブに分割する（`_build_main_tab`/`_build_settings_tab`）。「設定」タブでは `MediaSizeThresholds`/`AudioRipSettings`（サイズ閾値はMB単位のスピンボックスで表示、内部はバイトへ換算）を編集でき、「設定を保存」ボタン（`_on_settings_save_clicked`）で即座にTOMLへ反映・保存できる。設定ファイルの実際の場所も同タブに表示する（`config.get_config_path()`）。
    - `MainWindow.__init__()` はウィジェット構築直後に `config.get_config()` を読み込んで両タブの各ウィジェット（Joliet/Rock Ridge/UDFチェックボックス、検証チェックボックス、書き出し形式ラジオボタン、出力先ダイアログの初期フォルダ、設定タブのスピンボックス群）へ反映し（`_apply_config`）、`closeEvent()`（ワーカー実行中でない場合のみ）で両タブの現在の状態をまとめて保存する（`_save_current_settings`、内部で `_collect_current_config` を使用）。設定ファイルへの書き込みに失敗しても（権限不足等）アプリの終了自体は妨げない。
+   - `last_output_directory` は「参照…」ダイアログの初期フォルダとしてだけでなく、音楽CD選択時（`_on_device_changed`でis_audio判定時）に出力先フォルダ欄が空であれば、その初期値としても直接反映すること。ダイアログの初期フォルダとしてのみ使い、欄自体に反映しないと、「前回と同じフォルダに書き出したいだけなのに毎回「参照…」を押し直す必要がある」という実機での報告どおりの不満につながる（`tests/test_main_window.py`の`test_selecting_audio_cd_prefills_output_folder_from_last_directory`で検証済み）。ISO作成では出力先はファイル名まで必要なため、この補完はis_audioの場合のみに限ること。
    - `audio_format` は表示ラベルではなく `AudioFormat` のメンバー名（例: `"ALAC"`）で保存する。読み込み時に未知の値であれば `AudioFormat.ALAC` にフォールバックする。
 
 ## テスト

@@ -178,6 +178,82 @@ def test_selecting_audio_cd_shows_metadata_and_hides_iso_options(
     assert "3トラック" in window.metadata_status_label.text()
 
 
+def test_selecting_audio_cd_prefills_output_folder_from_last_directory(
+    qtbot,
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """音楽CD選択時、出力先フォルダ欄が空なら前回の出力先を初期値にする。
+
+    以前はlast_output_directoryが「参照…」ダイアログの初期フォルダとして
+    しか使われておらず、出力先フォルダ欄自体には反映されていなかった
+    （実機での報告により発見）。
+    """
+    monkeypatch.setattr(
+        main_window_module,
+        "query_disc_toc",
+        lambda device: DiscToc(track_offsets=[0], leadout_offset=1000),
+    )
+
+    window.show()
+    window._last_output_directory = "/Users/ac1965/Downloads/Music/"
+    assert window.output_edit.text() == ""
+
+    _select_volume(window, _audio_volume())
+
+    assert window.output_edit.text() == "/Users/ac1965/Downloads/Music/"
+
+
+def test_selecting_audio_cd_does_not_overwrite_existing_output_text(
+    qtbot,
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """出力先フォルダ欄に既に入力がある場合、前回の出力先で上書きしない。"""
+    monkeypatch.setattr(
+        main_window_module,
+        "query_disc_toc",
+        lambda device: DiscToc(track_offsets=[0], leadout_offset=1000),
+    )
+
+    window.show()
+    window._last_output_directory = "/some/remembered/path"
+    window.output_edit.setText("/user/typed/this/path")
+
+    _select_volume(window, _audio_volume())
+
+    assert window.output_edit.text() == "/user/typed/this/path"
+
+
+def test_selecting_dvd_does_not_prefill_output_field(
+    qtbot, window: MainWindow
+) -> None:
+    """ISO作成では出力先はファイル名まで必要なため、フォルダだけの
+    last_output_directoryを補完しない（不完全なパスになるため）。
+    """
+    window.show()
+    window._last_output_directory = "/Users/ac1965/Downloads/Music/"
+
+    _select_volume(window, _dvd_volume())
+
+    assert window.output_edit.text() == ""
+
+
+def test_progress_adds_note_for_drive_option_not_supported(
+    window: MainWindow,
+) -> None:
+    """cd-paranoiaの「405: Option not supported by drive」通知に、
+    エラーではないことを説明する補足を1回だけ添える。
+    """
+    window._on_progress("405: Option not supported by drive")
+    window._on_progress("405: Option not supported by drive")
+
+    log_text = window.log_view.toPlainText()
+
+    assert log_text.count("Option not supported by drive") == 2
+    assert log_text.count("影響なく") == 1
+
+
 def test_audio_cd_toc_failure_shows_error_status(
     qtbot,
     window: MainWindow,

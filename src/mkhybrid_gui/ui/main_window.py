@@ -88,6 +88,7 @@ class MainWindow(QMainWindow):
         self._disc_toc: DiscToc | None = None
         self._metadata_lookup_worker: MetadataLookupWorker | None = None
         self._last_output_directory = ""
+        self._drive_option_note_shown = False
 
         self._build_ui()
         self._apply_config(config.get_config())
@@ -451,6 +452,21 @@ class MainWindow(QMainWindow):
         is_audio = volume is not None and volume.media_type == MediaType.CD_AUDIO
 
         self.output_label.setText("出力先フォルダ:" if is_audio else "出力先ISO:")
+
+        # 音楽CD選択時、出力先フォルダ欄が空であれば前回の出力先
+        # （設定ファイルに保存された last_output_directory）を初期値
+        # として表示する。以前は「参照…」ダイアログの初期フォルダとして
+        # しか使われておらず、この欄自体には反映されていなかった
+        # （実機での報告により発見）。ISO作成では出力先はファイル名
+        # まで含む必要があり、前回のフォルダだけを補完しても不完全な
+        # パスになってしまうため、音楽CD選択時のみ行う。
+        if (
+            is_audio
+            and not self.output_edit.text().strip()
+            and self._last_output_directory
+        ):
+            self.output_edit.setText(self._last_output_directory)
+
         self.options_label.setVisible(not is_audio)
         self.joliet_checkbox.setVisible(not is_audio)
         self.rock_checkbox.setVisible(not is_audio)
@@ -769,6 +785,7 @@ class MainWindow(QMainWindow):
 
         self._is_audio_job = False
         self._cancel_requested = False
+        self._drive_option_note_shown = False
         self.log_view.clear()
         self.status_label.setText("ISOイメージを作成しています…")
         self._start_progress_indicator()
@@ -859,6 +876,7 @@ class MainWindow(QMainWindow):
 
         self._is_audio_job = True
         self._cancel_requested = False
+        self._drive_option_note_shown = False
         self.log_view.clear()
         self.status_label.setText("オーディオトラックを書き出しています…")
         self._start_progress_indicator()
@@ -955,6 +973,24 @@ class MainWindow(QMainWindow):
 
     def _on_progress(self, line: str) -> None:
         self.log_view.appendPlainText(line)
+
+        # cd-paranoiaがドライブ側の未対応な拡張コマンドを検出した際に
+        # 出す通知（例: "405: Option not supported by drive"）は、
+        # エラーのように見えるが実際にはリッピングの継続に影響しない
+        # （ドライブが特定の任意機能に対応していないという診断メッセージ
+        # であり、cd-paranoia自体がそのまま処理を続行する）。実機での
+        # 報告により、説明が無いためエラーだと誤解されやすいことが
+        # 判明したため、ログ本文はそのまま残しつつ、1回だけ補足を添える。
+        if (
+            not self._drive_option_note_shown
+            and "Option not supported by drive" in line
+        ):
+            self._drive_option_note_shown = True
+            self.log_view.appendPlainText(
+                "  → 上記はドライブが一部の拡張コマンドに対応していない"
+                "という通知です。リッピング自体には影響なく、"
+                "そのまま処理が続行されます。"
+            )
 
     def _on_finished(self, ok: bool, message: str) -> None:
         if ok:
