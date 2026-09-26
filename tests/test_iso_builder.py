@@ -158,42 +158,107 @@ def test_run_makehybrid_streams_progress_and_returns_result(
     ]
 
 
-def test_verify_iso_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    class FakeCompletedProcess:
-        returncode = 0
-        stdout = ""
-        stderr = ""
+class _FakeVerifyPopen:
+    def __init__(self, cmd, returncode: int = 0, lines: list[str] | None = None):
+        self.cmd = cmd
+        self.stdout = iter(lines or [])
+        self._returncode = returncode
 
-    def fake_run(cmd, **kwargs):
+    def wait(self) -> int:
+        return self._returncode
+
+
+def test_run_makehybrid_exposes_process_for_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``on_process_started`` で ``Popen`` を受け取り、後から中断できることを
+    確認する（安全な強制終了機能の前提となるフック）。
+    """
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+
+    captured: list[_FakePopen] = []
+
+    result = run_makehybrid(
+        "/Volumes/SAMPLE_CD",
+        "/tmp/out.iso",
+        on_process_started=captured.append,
+    )
+
+    assert result.ok is True
+    assert len(captured) == 1
+    assert captured[0].cmd[:2] == ["hdiutil", "makehybrid"]
+
+
+def test_verify_iso_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_popen(cmd, **kwargs):
         assert cmd == [
             "hdiutil",
             "verify",
             "/tmp/out.iso",
         ]
-        return FakeCompletedProcess()
+        return _FakeVerifyPopen(cmd, returncode=0)
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
 
     result = verify_iso("/tmp/out.iso")
     assert result.ok is True
 
 
 def test_verify_iso_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    class FakeCompletedProcess:
-        returncode = 1
-        stdout = ""
-        stderr = "checksum mismatch"
-
-    def fake_run(cmd, **kwargs):
+    def fake_popen(cmd, **kwargs):
         assert cmd == [
             "hdiutil",
             "verify",
             "/tmp/out.iso",
         ]
-        return FakeCompletedProcess()
+        return _FakeVerifyPopen(
+            cmd,
+            returncode=1,
+            lines=["checksum mismatch\n"],
+        )
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
 
     result = verify_iso("/tmp/out.iso")
     assert result.ok is False
     assert "checksum mismatch" in result.stderr
+
+
+def test_verify_iso_streams_progress_live(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """検証完了を待たずに、出力がその場で on_progress に届くことを確認する。
+
+    以前は ``subprocess.run`` で完了を待ってから出力をまとめて渡していたため、
+    大容量イメージの検証中はGUIに一切の進捗が反映されなかった。
+    """
+
+    def fake_popen(cmd, **kwargs):
+        return _FakeVerifyPopen(
+            cmd,
+            returncode=0,
+            lines=["Verifying...\n", "checksum: OK\n"],
+        )
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    lines: list[str] = []
+    result = verify_iso("/tmp/out.iso", on_progress=lines.append)
+
+    assert result.ok is True
+    assert lines == ["Verifying...", "checksum: OK"]
+
+
+def test_verify_iso_reports_100_percent_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_popen(cmd, **kwargs):
+        return _FakeVerifyPopen(cmd, returncode=0)
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+
+    percents: list[int] = []
+    result = verify_iso("/tmp/out.iso", on_percent=percents.append)
+
+    assert result.ok is True
+    assert percents == [100]

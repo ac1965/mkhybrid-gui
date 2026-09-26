@@ -40,12 +40,19 @@ from functools import lru_cache
 from pathlib import Path
 
 ProgressCallback = Callable[[str], None]
+ProgressPercentCallback = Callable[[int], None]
+ProcessStartedCallback = Callable[["subprocess.Popen[str]"], None]
+CancelCheck = Callable[[], bool]
 
 _TRACK_LINE_RE = re.compile(r"^\s*(\d+)\.\s")
 
 
 class AudioCdError(RuntimeError):
     """音楽CDのリッピング・変換に失敗した場合に送出する。"""
+
+
+class RipCancelled(AudioCdError):
+    """ユーザーの操作によりリッピング・変換を中断した場合に送出する。"""
 
 
 class AudioFormat(str, Enum):
@@ -81,19 +88,16 @@ REQUIRED_TOOLS: dict[AudioFormat, tuple[str, ...]] = {
 def _effective_path() -> str:
     """外部コマンド実行に使用するPATHを取得する。
 
-    Terminalから起動された場合は、そのプロセスのPATHをそのまま利用する。
-    Finder等から起動され、PATHに必要なコマンドが含まれていない場合は、
-    ログインシェルからPATHを取得する。
-
-    Homebrewのインストール先などをアプリケーション側で固定しないため、
-    外部コマンドは常にこのPATHを通して検索・実行する。
+    Finder/LaunchServices経由でGUIアプリとして起動された場合でも、
+    launchdが ``/usr/bin:/bin:/usr/sbin:/sbin`` 程度の最小限のPATHを
+    設定するため、プロセスの ``PATH`` が空になることはほぼない。
+    そのため「PATHが空なら」という条件でログインシェルのPATH取得を
+    スキップすると、Homebrewのインストール先（``/opt/homebrew/bin`` や
+    ``/usr/local/bin``）が常に欠落し、GUI起動時に外部コマンドが
+    見つからなくなる。これを避けるため、プロセスのPATHとログイン
+    シェルのPATHを常にマージして返す。
     """
     current_path = os.environ.get("PATH", "")
-
-    # Terminal起動時など、すでに必要なPATHが設定されている場合は
-    # シェルを起動する必要がない。
-    if current_path:
-        return current_path
 
     shell = os.environ.get("SHELL", "/bin/zsh")
 
@@ -105,11 +109,17 @@ def _effective_path() -> str:
             check=True,
             env=os.environ.copy(),
         )
+        shell_path = result.stdout.strip()
     except (OSError, subprocess.SubprocessError):
-        return current_path
+        shell_path = ""
 
-    shell_path = result.stdout.strip()
-    return shell_path or current_path
+    merged: list[str] = []
+
+    for path_entry in (*current_path.split(":"), *shell_path.split(":")):
+        if path_entry and path_entry not in merged:
+            merged.append(path_entry)
+
+    return ":".join(merged) if merged else current_path
 
 
 def _tool_path(tool: str) -> str | None:
@@ -153,6 +163,7 @@ class CommandResult:
 def _run_streaming(
     cmd: list[str],
     on_progress: ProgressCallback | None,
+    on_process_started: ProcessStartedCallback | None = None,
 ) -> CommandResult:
     """外部コマンドをPATH引き継ぎ環境で実行する。"""
     proc = subprocess.Popen(
@@ -162,6 +173,9 @@ def _run_streaming(
         text=True,
         env=_command_env(),
     )
+
+    if on_process_started is not None:
+        on_process_started(proc)
 
     lines: list[str] = []
     assert proc.stdout is not None
@@ -274,17 +288,33 @@ def rip_track_verified(
     *,
     verify: bool = True,
     max_attempts: int = 3,
+    on_process_started: ProcessStartedCallback | None = None,
+    cancel_check: CancelCheck | None = None,
 ) -> RipTrackResult:
     """トラックをcd-paranoiaでリッピングし、独立した複数回の読み取り結果が
     一致するかどうかで検証する。
 
     ``verify`` がFalseの場合は1回だけ読み取り、cd-paranoia自身の誤り訂正・
     再読込のみに頼る（検証は行わない）。
+
+    ``cancel_check`` は各試行の前後で呼び出され、``True`` を返すと
+    ``RipCancelled`` を送出して安全に中断する（これまでの試行で作成した
+    一時WAVファイルは削除する）。
     """
     attempts_needed = max_attempts if verify else 1
     seen: list[tuple[Path, str]] = []
 
+    def cancelled() -> bool:
+        return cancel_check is not None and cancel_check()
+
     for attempt in range(1, attempts_needed + 1):
+        if cancelled():
+            for stale_path, _ in seen:
+                stale_path.unlink(missing_ok=True)
+            raise RipCancelled(
+                f"トラック{track_number}のリッピングを中断しました。"
+            )
+
         wav_path = work_dir / f"track{track_number:02d}.attempt{attempt}.wav"
 
         if on_progress is not None:
@@ -296,7 +326,16 @@ def rip_track_verified(
         result = _run_streaming(
             build_rip_command(track_number, wav_path, device),
             on_progress,
+            on_process_started=on_process_started,
         )
+
+        if cancelled():
+            wav_path.unlink(missing_ok=True)
+            for stale_path, _ in seen:
+                stale_path.unlink(missing_ok=True)
+            raise RipCancelled(
+                f"トラック{track_number}のリッピングを中断しました。"
+            )
 
         if not result.ok or not wav_path.exists():
             continue
@@ -421,11 +460,16 @@ def convert_audio(
     target_path: Path,
     audio_format: AudioFormat,
     on_progress: ProgressCallback | None = None,
+    on_process_started: ProcessStartedCallback | None = None,
+    cancel_check: CancelCheck | None = None,
 ) -> None:
     """``source_wav`` を ``audio_format`` に変換し ``target_path`` に書き出す。"""
     if audio_format == AudioFormat.WAV:
         shutil.copyfile(source_wav, target_path)
         return
+
+    if cancel_check is not None and cancel_check():
+        raise RipCancelled("フォーマット変換を中断しました。")
 
     cmd = build_convert_command(
         source_wav,
@@ -433,7 +477,15 @@ def convert_audio(
         audio_format,
     )
 
-    result = _run_streaming(cmd, on_progress)
+    result = _run_streaming(
+        cmd,
+        on_progress,
+        on_process_started=on_process_started,
+    )
+
+    if cancel_check is not None and cancel_check():
+        target_path.unlink(missing_ok=True)
+        raise RipCancelled("フォーマット変換を中断しました。")
 
     if not result.ok:
         raise AudioCdError(
@@ -458,6 +510,7 @@ class RipResult:
 
     tracks: list[TrackOutcome] = field(default_factory=list)
     failed_tracks: list[tuple[int, str]] = field(default_factory=list)
+    cancelled: bool = False
 
     @property
     def ok(self) -> bool:
@@ -481,9 +534,16 @@ def rip_and_convert_disc(
     *,
     verify: bool = True,
     max_attempts: int = 3,
+    on_percent: ProgressPercentCallback | None = None,
+    on_process_started: ProcessStartedCallback | None = None,
+    cancel_check: CancelCheck | None = None,
 ) -> RipResult:
     """音楽CDの全トラックをリッピングし、指定フォーマットで
     ``destination_dir`` に書き出す。
+
+    ``on_percent`` にはトラック単位の粗い進捗率（0〜100）を通知する。
+    ``cancel_check`` が ``True`` を返した時点で、以降のトラック処理を
+    行わずに安全に打ち切る（``RipResult.cancelled`` が ``True`` になる）。
     """
     dest = Path(destination_dir)
     dest.mkdir(parents=True, exist_ok=True)
@@ -495,8 +555,16 @@ def rip_and_convert_disc(
 
     tracks: list[TrackOutcome] = []
     failed: list[tuple[int, str]] = []
+    cancelled = False
 
     for track_number in range(1, track_count + 1):
+        if cancel_check is not None and cancel_check():
+            cancelled = True
+            break
+
+        if on_percent is not None:
+            on_percent(round((track_number - 1) / track_count * 100))
+
         if on_progress is not None:
             on_progress(
                 f"[{track_number}/{track_count}] "
@@ -511,7 +579,12 @@ def rip_and_convert_disc(
                 on_progress,
                 verify=verify,
                 max_attempts=max_attempts,
+                on_process_started=on_process_started,
+                cancel_check=cancel_check,
             )
+        except RipCancelled:
+            cancelled = True
+            break
         except AudioCdError as exc:
             failed.append((track_number, str(exc)))
             continue
@@ -527,7 +600,12 @@ def rip_and_convert_disc(
                 target,
                 audio_format,
                 on_progress,
+                on_process_started=on_process_started,
+                cancel_check=cancel_check,
             )
+        except RipCancelled:
+            cancelled = True
+            break
         except AudioCdError as exc:
             failed.append((track_number, str(exc)))
             continue
@@ -542,9 +620,13 @@ def rip_and_convert_disc(
             )
         )
 
+    if on_percent is not None and not cancelled:
+        on_percent(100)
+
     return RipResult(
         tracks=tracks,
         failed_tracks=failed,
+        cancelled=cancelled,
     )
 
 
@@ -560,6 +642,7 @@ if QThread is not None:
         """音楽CDのリッピング・変換をバックグラウンドスレッドで実行するワーカー。"""
 
         progress = Signal(str)
+        progress_percent = Signal(int)
         finished_ok = Signal(bool, str)
 
         def __init__(
@@ -577,6 +660,28 @@ if QThread is not None:
             self._audio_format = audio_format
             self._work_dir = work_dir
             self._verify = verify
+            self._process: subprocess.Popen[str] | None = None
+            self._cancel_requested = False
+
+        def request_cancel(self) -> None:
+            """実行中の外部コマンドを安全に中断する。
+
+            GUIスレッドから呼び出される想定。次にトラック/試行の境界へ
+            達した時点で処理を打ち切るほか、実行中のプロセスへも
+            ``terminate`` を送り、ブロッキングしている出力読み取りを
+            速やかに終了させる。
+            """
+            self._cancel_requested = True
+
+            process = self._process
+            if process is not None and process.poll() is None:
+                process.terminate()
+
+        def _capture_process(self, process: subprocess.Popen[str]) -> None:
+            self._process = process
+
+        def _is_cancelled(self) -> bool:
+            return self._cancel_requested
 
         def run(self) -> None:  # noqa: D102 - QThreadのオーバーライド
             try:
@@ -587,9 +692,19 @@ if QThread is not None:
                     self._work_dir,
                     on_progress=self.progress.emit,
                     verify=self._verify,
+                    on_percent=self.progress_percent.emit,
+                    on_process_started=self._capture_process,
+                    cancel_check=self._is_cancelled,
                 )
             except AudioCdError as exc:
                 self.finished_ok.emit(False, str(exc))
+                return
+
+            if result.cancelled:
+                self.finished_ok.emit(
+                    False,
+                    "ユーザーの操作により中断しました。",
+                )
                 return
 
             if not result.ok:

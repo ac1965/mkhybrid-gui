@@ -62,6 +62,7 @@ class MainWindow(QMainWindow):
         self._volumes: list[Volume] = []
         self._worker: IsoWorker | AudioRipWorker | None = None
         self._is_audio_job = False
+        self._cancel_requested = False
         self._audio_work_tmpdir: tempfile.TemporaryDirectory[str] | None = None
 
         self._build_ui()
@@ -137,9 +138,15 @@ class MainWindow(QMainWindow):
         self.media_info_label = QLabel("")
         root_layout.addWidget(self.media_info_label)
 
+        start_row = QHBoxLayout()
         self.start_button = QPushButton("ISOイメージを作成")
         self.start_button.clicked.connect(self._on_start_clicked)
-        root_layout.addWidget(self.start_button)
+        self.cancel_button = QPushButton("中断")
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.clicked.connect(self._on_cancel_clicked)
+        start_row.addWidget(self.start_button, stretch=1)
+        start_row.addWidget(self.cancel_button)
+        root_layout.addLayout(start_row)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
@@ -165,7 +172,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "処理を実行中です",
-                "ISOイメージの作成/オーディオの書き出しが完了するまでお待ちください。",
+                "ISOイメージの作成/オーディオの書き出しが完了するまで"
+                "お待ちいただくか、「中断」ボタンで安全に停止してください。",
             )
             event.ignore()
             return
@@ -321,6 +329,7 @@ class MainWindow(QMainWindow):
         source = volume.mount_point or f"/dev/{volume.device_identifier}"
 
         self._is_audio_job = False
+        self._cancel_requested = False
         self.log_view.clear()
         self.status_label.setText("ISOイメージを作成しています…")
         self._start_progress_indicator()
@@ -395,6 +404,7 @@ class MainWindow(QMainWindow):
                 return
 
         self._is_audio_job = True
+        self._cancel_requested = False
         self.log_view.clear()
         self.status_label.setText("オーディオトラックを書き出しています…")
         self._start_progress_indicator()
@@ -416,19 +426,32 @@ class MainWindow(QMainWindow):
         )
 
         worker.progress.connect(self._on_progress)
+        worker.progress_percent.connect(self._on_progress_percent)
         worker.finished_ok.connect(self._on_finished)
 
         self._worker = worker
         worker.start()
 
     def _start_progress_indicator(self) -> None:
-        """処理開始時に進捗バーを表示する。"""
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
+        """処理開始時に進捗バーを表示する。
+
+        実際の進捗率が届くまでは、処理が固まっているように見えない
+        よう不確定（ビジー）表示にする。``hdiutil makehybrid`` は
+        実際には進捗率を一切出力しないため、ISO作成中はこのビジー表示の
+        ままとなる（検証開始・完了時にのみ確定的な値へ切り替わる）。
+        """
+        self.progress_bar.setRange(0, 0)
         self.progress_bar.setVisible(True)
 
     def _on_progress_percent(self, percent: int) -> None:
-        """ワーカーから受信した実進捗率を表示する。"""
+        """ワーカーから受信した実進捗率を表示する。
+
+        初めて実進捗率を受信した時点で、不確定（ビジー）表示から
+        確定的な0〜100%表示へ切り替える。
+        """
+        if self.progress_bar.maximum() == 0:
+            self.progress_bar.setRange(0, 100)
+
         self.progress_bar.setValue(max(0, min(percent, 100)))
 
     def _set_controls_enabled(self, enabled: bool) -> None:
@@ -446,22 +469,52 @@ class MainWindow(QMainWindow):
 
         self.verify_checkbox.setEnabled(enabled)
 
+        # 中断ボタンは処理中（enabled=False）のみ有効にする。
+        self.cancel_button.setEnabled(not enabled)
+
+    def _on_cancel_clicked(self) -> None:
+        if self._worker is None:
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "中断の確認",
+            "実行中の処理を中断しますか？\n"
+            "ここまでの一時ファイルは破棄されます。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self._cancel_requested = True
+        self.cancel_button.setEnabled(False)
+        self.status_label.setText("中断しています…")
+        self._worker.request_cancel()
+
     def _on_progress(self, line: str) -> None:
         self.log_view.appendPlainText(line)
 
     def _on_finished(self, ok: bool, message: str) -> None:
         if ok:
+            self.progress_bar.setRange(0, 100)
             self.progress_bar.setValue(100)
 
         self.progress_bar.setVisible(False)
 
         self._set_controls_enabled(True)
+
+        cancelled = self._cancel_requested and not ok
+        self._cancel_requested = False
+
         self.status_label.setText(
-            message if ok else f"エラー: {message}"
+            message if (ok or cancelled) else f"エラー: {message}"
         )
 
         if ok:
             QMessageBox.information(self, "完了", message)
+        elif cancelled:
+            QMessageBox.information(self, "中断しました", message)
         elif self._is_audio_job:
             QMessageBox.critical(self, "失敗", message)
         else:

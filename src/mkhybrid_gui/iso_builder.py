@@ -14,6 +14,7 @@ from pathlib import Path
 
 ProgressCallback = Callable[[str], None]
 ProgressPercentCallback = Callable[[int], None]
+ProcessStartedCallback = Callable[["subprocess.Popen[str]"], None]
 
 
 @dataclass(frozen=True)
@@ -108,11 +109,17 @@ def run_makehybrid(
     options: IsoOptions | None = None,
     on_progress: ProgressCallback | None = None,
     on_percent: ProgressPercentCallback | None = None,
+    on_process_started: ProcessStartedCallback | None = None,
 ) -> CommandResult:
     """ハイブリッドISOを作成する。
 
-    標準出力・標準エラーを1行ずつ ``on_progress`` に渡し、
-    ``-puppetstrings`` が出力する進捗率を ``on_percent`` に渡す。
+    標準出力・標準エラーを1行ずつ ``on_progress`` に渡す。
+    ``hdiutil makehybrid`` は ``-puppetstrings`` を受け付けず、通常の
+    出力にもパーセント表示を含まないため、``on_percent`` が実際の
+    進捗率で呼ばれることは基本的にない（呼び出し側はビジー表示に
+    フォールバックすること）。``on_process_started`` は起動直後の
+    ``Popen`` を受け取り、外部から中断（``terminate``/``kill``）
+    できるようにするためのフックである。
     """
     cmd = build_makehybrid_command(source, output_path, options)
 
@@ -120,6 +127,7 @@ def run_makehybrid(
         cmd,
         on_progress=on_progress,
         on_percent=on_percent,
+        on_process_started=on_process_started,
     )
 
 
@@ -127,37 +135,35 @@ def verify_iso(
     image_path: str | Path,
     on_progress: ProgressCallback | None = None,
     on_percent: ProgressPercentCallback | None = None,
+    on_process_started: ProcessStartedCallback | None = None,
 ) -> CommandResult:
     """作成済みイメージを ``hdiutil verify`` で検証する。
 
-    ``subprocess.run`` を使用することで、既存のテストと互換性を保つ。
+    ``run_makehybrid`` と同様にストリーミング実行する。以前は
+    ``subprocess.run`` で完了を待ってから出力をまとめて ``on_progress``
+    に渡していたため、検証中（大容量BDでは数分かかりうる）にGUIへ
+    一切の進捗が反映されないという問題があった。
     """
     cmd = build_verify_command(image_path)
 
-    result = subprocess.run(
+    result = _run_streaming(
         cmd,
-        capture_output=True,
-        text=True,
-        check=False,
+        on_progress=on_progress,
+        on_percent=on_percent,
+        on_process_started=on_process_started,
     )
 
-    if on_progress is not None:
-        for line in result.stdout.splitlines():
-            on_progress(line)
-
-    if on_percent is not None and result.returncode == 0:
+    if on_percent is not None and result.ok:
         on_percent(100)
 
-    return CommandResult(
-        returncode=result.returncode,
-        stderr=result.stderr,
-    )
+    return result
 
 
 def _run_streaming(
     cmd: list[str],
     on_progress: ProgressCallback | None,
     on_percent: ProgressPercentCallback | None = None,
+    on_process_started: ProcessStartedCallback | None = None,
 ) -> CommandResult:
     """外部コマンドを実行し、出力をリアルタイムに通知する。"""
     proc = subprocess.Popen(
@@ -167,6 +173,9 @@ def _run_streaming(
         text=True,
         bufsize=1,
     )
+
+    if on_process_started is not None:
+        on_process_started(proc)
 
     output_lines: list[str] = []
 
@@ -254,6 +263,24 @@ if QThread is not None:
             self._source = source
             self._output_path = output_path
             self._options = options or IsoOptions()
+            self._process: subprocess.Popen[str] | None = None
+            self._cancel_requested = False
+
+        def request_cancel(self) -> None:
+            """実行中の ``hdiutil`` プロセスを安全に中断する。
+
+            GUIスレッドから呼び出される想定。実行中のプロセスへ
+            ``terminate`` を送ることで、ブロッキングしている出力読み取り
+            ループを速やかに終了させる。
+            """
+            self._cancel_requested = True
+
+            process = self._process
+            if process is not None and process.poll() is None:
+                process.terminate()
+
+        def _capture_process(self, process: subprocess.Popen[str]) -> None:
+            self._process = process
 
         def run(self) -> None:  # noqa: D102 - QThreadのオーバーライド
             def on_build_percent(percent: int) -> None:
@@ -267,7 +294,15 @@ if QThread is not None:
                 self._options,
                 on_progress=self.progress.emit,
                 on_percent=on_build_percent,
+                on_process_started=self._capture_process,
             )
+
+            if self._cancel_requested:
+                self.finished_ok.emit(
+                    False,
+                    "ユーザーの操作により中断しました。",
+                )
+                return
 
             if not build_result.ok:
                 self.finished_ok.emit(
@@ -286,7 +321,15 @@ if QThread is not None:
             verify_result = verify_iso(
                 self._output_path,
                 on_progress=self.progress.emit,
+                on_process_started=self._capture_process,
             )
+
+            if self._cancel_requested:
+                self.finished_ok.emit(
+                    False,
+                    "ユーザーの操作により中断しました。",
+                )
+                return
 
             if not verify_result.ok:
                 self.finished_ok.emit(

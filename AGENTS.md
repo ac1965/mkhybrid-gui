@@ -8,9 +8,11 @@
 - **目的**: macOSに接続した光学ドライブの内容を、`hdiutil makehybrid` を用いて Windows/Linux 双方で読み取り可能なハイブリッドISOイメージに変換するGUIツールを提供する。
 - **対応メディア**: データCD / 音楽CD（Audio CD） / DVD / Blu-ray（BD）。BDXL（大容量BD）・M-DISC（アーカイブ用メディア）は、OS上は通常のBD-R/BD-REと同じファイルシステムでマウントされるため、追加のメディア種別分岐は不要（[disk_utils.py](src/mkhybrid_gui/disk_utils.py) の `detect_media_type` はサイズベースの判定でこれらを自然にカバーする）。
   - データCD/DVD/BD: `hdiutil makehybrid` でISOイメージ化（ISO9660 + Joliet + Rock Ridge、DVD/BDでは大容量ファイル対応のUDFを追加可能）。
-  - 音楽CD: [audio_cd.py](src/mkhybrid_gui/audio_cd.py) が `cdparanoia`（誤り訂正・再読込付きの正確なリッピング）でWAVを取得し、`afconvert`（ALAC/AIFF/AAC）または `flac`（FLAC）でユーザー選択の形式に変換する。WAVはそのまま採用する。macOS標準のCDDAFSマウント（単純なAIFFコピー）は誤り訂正・検証ができないため使用しない。
+  - 音楽CD: [audio_cd.py](src/mkhybrid_gui/audio_cd.py) が `cd-paranoia`（誤り訂正・再読込付きの正確なリッピング）でWAVを取得し、`afconvert`（ALAC/AIFF/AAC）または `flac`（FLAC）でユーザー選択の形式に変換する。WAVはそのまま採用する。macOS標準のCDDAFSマウント（単純なAIFFコピー）は誤り訂正・検証ができないため使用しない。
 - **対象OS**: macOS専用（`hdiutil` / `diskutil` はmacOS標準コマンドに依存するため、Windows/Linuxでは動作しない）。
-- **追加の外部依存（Homebrew）**: `cdparanoia`（音楽CDの正確なリッピングに必須）、`flac`（FLAC書き出し時のみ必須）。これらはmacOS標準コマンドではないため、利用者に `brew install cdparanoia flac` の実行を求める。ISOイメージ作成（データCD/DVD/BD）はこれらに依存しない。
+- **追加の外部依存（Homebrew）**: `cd-paranoia`（音楽CDの正確なリッピングに必須。Homebrewパッケージ名は `libcdio-paranoia`）、`flac`（FLAC書き出し時のみ必須。パッケージ名も `flac`）。これらはmacOS標準コマンドではないため、利用者に `brew install libcdio-paranoia flac` の実行を求める。ISOイメージ作成（データCD/DVD/BD）はこれらに依存しない。
+  - コマンド名とHomebrewパッケージ名が一致しない（`cd-paranoia` ⇔ `libcdio-paranoia`）ため、パッケージ名を書く箇所では取り違えないこと。対応表は [main_window.py](src/mkhybrid_gui/ui/main_window.py) の `_BREW_PACKAGES` を参照。
+- **外部コマンドの解決（PATH）**: GUIアプリとして（Finder等から）起動された場合でも、macOS/launchdはプロセスに `/usr/bin:/bin:/usr/sbin:/sbin` 程度の最小限の`PATH`を設定するため、`PATH`が非空であることは「必要なコマンドが見つかる」ことを意味しない。[audio_cd.py](src/mkhybrid_gui/audio_cd.py) の `_effective_path()` は、`PATH`の空/非空にかかわらず**常に**ログインシェルの`PATH`（Homebrewのインストール先を含む）を取得してプロセスの`PATH`とマージする。「`PATH`が空の場合だけログインシェルを問い合わせる」という条件分岐に戻すと、GUI起動時にHomebrewのコマンドが見つからなくなる回帰バグになるため、変更する際は必ずこの前提を守ること。
 - **想定ユーザー**: 社内配布用メディアの作成を行う非エンジニアも含む担当者。CLIを意識させず、GUIから完結させる。
 
 ## 技術スタック
@@ -31,7 +33,8 @@
           self.finished_ok.emit(proc.wait() == 0)
   ```
 
-- **外部コマンド呼び出し**: `subprocess`（macOS標準: `diskutil list`, `diskutil info`, `hdiutil makehybrid`, `hdiutil verify`、`afconvert`。Homebrew依存: `cdparanoia`, `flac`）。使用前に `shutil.which` で有無を確認し、不足時はインストール方法（`brew install ...`）をGUIに明示する（`audio_cd.missing_tools`）。
+- **外部コマンド呼び出し**: `subprocess`（macOS標準: `diskutil list`, `diskutil info`, `hdiutil makehybrid`, `hdiutil verify`、`afconvert`。Homebrew依存: `cd-paranoia`, `flac`）。使用前に `shutil.which` で有無を確認し、不足時はインストール方法（`brew install ...`）をGUIに明示する（`audio_cd.missing_tools`）。
+- **`hdiutil makehybrid` の制約（実機で確認済み）**: `-rock`・`-puppetstrings` オプションは受け付けない（指定すると `-puppetstrings option not allowed` 等で失敗する）。Rock Ridge拡張は `-iso` を指定した時点で自動的に有効になるため、`-rock` を明示的に渡す必要はない。また `-verbose` を付けても含めても、ビルド中に機械可読な進捗率（パーセント）は一切出力されない（`hdiutil verify` も同様）。そのため [iso_builder.py](src/mkhybrid_gui/iso_builder.py) の `on_percent` コールバックは、ISO作成フェーズでは実質的に呼ばれない前提でGUI側を設計すること（進捗バーはビジー表示にフォールバックする）。これらの制約を「バグ」と誤認して `-rock`/`-puppetstrings` をコマンドに追加する修正をしないこと。
 - **パッケージング**: `PyInstaller` を用いて `.app` バンドルを生成する（Qtプラグインの取りこぼしを避けるため `py2app` ではなくこちらを採用。配布時はコード署名なしのadhoc署名で可）。`plugins/platforms`（`libqcocoa.dylib`等）が正しく同梱されるかをビルド手順で確認する。
 - **UI構成**: レイアウトは `QVBoxLayout`/`QHBoxLayout`/`QFormLayout` 等で構成する。必要に応じてQt Designerの`.ui`ファイル＋`pyside6-uic`変換によるコード分離運用も選択可とする。
 
@@ -48,7 +51,7 @@
 │       ├── app.py              # エントリポイント / GUI起動
 │       ├── disk_utils.py       # diskutil list/info のパース、メディア種別（MediaType）判定
 │       ├── iso_builder.py      # hdiutil makehybrid / verify のラッパー、IsoWorker(QThread)
-│       ├── audio_cd.py         # cdparanoiaによる正確なリッピング、afconvert/flacでの形式変換、AudioRipWorker(QThread)
+│       ├── audio_cd.py         # cd-paranoiaによる正確なリッピング、afconvert/flacでの形式変換、AudioRipWorker(QThread)
 │       └── ui/
 │           └── main_window.py  # PySide6ウィジェット定義（メディア種別に応じてUIを切替）
 ├── tests/
@@ -62,13 +65,16 @@
 
 ```bash
 # 音楽CDの正確なリッピング・FLAC書き出しに必要（データCD/DVD/BDのISO作成には不要）
-brew install cdparanoia flac
+brew install libcdio-paranoia flac
 
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt   # PySide6 を含む
+pip install -e ".[dev]"   # PySide6・pytest等をpyproject.tomlの[project.optional-dependencies]から導入
 python -m mkhybrid_gui.app
 ```
+
+依存関係は `requirements.txt` ではなく `pyproject.toml` の `[project]`/
+`[project.optional-dependencies]` で管理する。
 
 ## ビルド（.app化）
 
@@ -102,26 +108,30 @@ make distclean  # clean に加えて .venv も削除
 1. **デバイス/ドライブ選択**: `diskutil list` の結果からマウント済みボリュームの一覧をGUI上に表示し、ユーザーに選択させる。各ボリュームは `diskutil info -plist` の `FilesystemType` とサイズから `MediaType`（データCD/音楽CD/DVD/BD）を推定し、選択肢のラベルに表示する（`disk_utils.detect_media_type`）。
 2. **イメージ作成（データCD/DVD/BD）**: 選択対象に対して以下を実行する。
    ```
-   hdiutil makehybrid -iso -joliet -rock [-udf] -o <出力先.iso> <デバイスorマウントポイント>
+   hdiutil makehybrid -iso [-joliet] [-udf] -o <出力先.iso> <デバイスorマウントポイント>
    ```
-   - `-rock` はデフォルトでON、詳細オプション（Jolietのみ等）はGUI上のチェックボックスで切り替え可能にする。
+   - GUI上の「Rock Ridge」チェックボックスはデフォルトONだが、`hdiutil makehybrid` 自体は `-rock` オプションを受け付けない（`-iso` 指定時にRock Ridge拡張が自動的に有効になるため）。したがって実際にコマンドへ渡すのは `-iso`/`-joliet`/`-udf` のみでよく、`-rock`を渡そうとする修正はしないこと（詳細は「技術スタック」の `hdiutil makehybrid` の制約を参照）。
+   - `-joliet`・`-udf` はGUI上のチェックボックスで切り替え可能にする。
    - `-udf` はDVD/BD（BDXL・M-DISCを含む）選択時にデフォルトON（ISO9660の4GBファイルサイズ上限を回避するため）、CD選択時はデフォルトOFF。ユーザーは任意に変更できる。
 3. **音楽CDの正確なリッピング**: `MediaType.CD_AUDIO` を選択した場合、ISO作成UIの代わりに出力先フォルダ選択・書き出し形式（ALAC/AIFF/FLAC/WAV/AAC、既定はALAC）・検証チェックボックスに切り替える。以下の3要件を満たすこと。
-   1. **正確な読み取り**: `cdparanoia` をパラノイアモード（`-Z` を指定しない）で実行し、ジッター補正・C2エラー利用を有効にする。
-   2. **誤り訂正・再読込**: 上記はcdparanoia自体が内部で行う（再実装しない）。
+   1. **正確な読み取り**: `cd-paranoia` をパラノイアモード（`-Z` を指定しない）で実行し、ジッター補正・C2エラー利用を有効にする。
+   2. **誤り訂正・再読込**: 上記はcd-paranoia自体が内部で行う（再実装しない）。
    3. **検証**: 1トラックを独立して複数回（既定2回、不一致なら最大3回まで）リッピングし、WAVのSHA-256チェックサムが一致することを確認する（`audio_cd.rip_track_verified`）。一致しなければ最後の読み取りを「未検証」として採用し、完了メッセージで警告する。
    - 取得したWAVは `afconvert`（ALAC/AIFF/AAC）または `flac`（FLAC）でユーザー選択の形式に変換する（`audio_cd.convert_audio`）。WAV選択時は変換不要でそのまま採用する。
    - 実行前に `audio_cd.missing_tools` で必要な外部コマンドの有無を確認し、不足時は `brew install ...` の案内を表示して処理を開始しない。
 4. **進捗表示**: `IsoWorker` / `AudioRipWorker`（いずれも `QThread`）で非同期実行し、`progress` シグナルでメインスレッドのUIを更新する。処理中はGUIをブロックしないこと。
-5. **検証（ISO）**: ISOイメージ作成後に `hdiutil verify <出力先.iso>` を自動実行し、結果をGUIに表示する。
+   - `hdiutil makehybrid` は実際には進捗率を出力しないため、ISO作成フェーズの進捗バーは不確定（ビジー）表示のままにし、検証フェーズ開始・完了時のみ確定値（90%/100%）へ切り替える（実進捗率が得られたと偽装しない）。
+   - 音楽CDのリッピングは、トラック単位（現在のトラック番号／総トラック数）の粗い進捗率を `progress_percent` シグナルで通知する。
+5. **検証（ISO）**: ISOイメージ作成後に `hdiutil verify <出力先.iso>` を自動実行し、結果をGUIに表示する。検証中の出力も（完了を待たず）その場でGUIへストリーミング表示すること（`subprocess.run` で完了まで待ってからまとめて表示する実装に戻さない）。
 6. **エラーハンドリング**: コピーガード付きメディア等でセクタ単位読み取りが必要なケースを検出できない場合は、明確なエラーメッセージを表示し、対処法（別ツールの利用など）を案内する。
+7. **安全な中断**: 実行中のISO作成・音楽CDリッピングは、GUI上の「中断」ボタンから中断できること。中断時は実行中の外部コマンドへ `terminate`（SIGTERM）を送り、作成途中の一時ファイル（WAV・部分的なISO等）を削除してから完了通知を出す（`IsoWorker.request_cancel` / `AudioRipWorker.request_cancel`、`audio_cd.RipCancelled`）。また、処理中はウィンドウを閉じられないようにし（`MainWindow.closeEvent`）、実行中のバックグラウンドスレッドを残したままアプリが終了しないようにすること。
 
 ## テスト
 
 - `disk_utils.py` のパース処理・メディア種別判定（`detect_media_type`）は `diskutil list -plist` / `diskutil info -plist` のサンプル出力を固定データとして用意し、ユニットテストでカバーする。
 - `iso_builder.py` は実際のCD-ROMを使わず、`subprocess.run`/`subprocess.Popen` をモック化してコマンド組み立て・実行結果処理のみを検証する。
-- `audio_cd.py` は実際の音楽CD・cdparanoia/afconvert/flacバイナリを使わず、`subprocess.run`/`subprocess.Popen` をモック化してトラック数解析・コマンド組み立て・検証ロジック（複数回読み取りの一致判定）・変換処理を検証する。
-- GUI部分のテストには `pytest-qt`（`qtbot`）を用いる。
+- `audio_cd.py` は実際の音楽CD・cd-paranoia/afconvert/flacバイナリを使わず、`subprocess.run`/`subprocess.Popen` をモック化してトラック数解析・コマンド組み立て・検証ロジック（複数回読み取りの一致判定）・変換処理を検証する。
+- GUI部分のテストには `pytest-qt`（`qtbot`）を用いる（現状 `pyproject.toml` の `dev` extrasには含めているが、`main_window.py` に対する実際のテストは未整備。README.md の「ロードマップ・既知の制限」で追跡している）。
 - 実機（実CD-ROM/DVD/BD/音楽CD）を使った結合テストはCI対象外とし、手動確認手順をREADMEに記載する。
 
 ## やってはいけないこと
@@ -130,9 +140,12 @@ make distclean  # clean に加えて .venv も削除
 - `hdiutil`/`diskutil` の出力形式変更に備え、テキストパースではなく `-plist` 出力（`plistlib`でパース）を優先する。
 - ユーザーの許可なくディスクのアンマウント・イジェクトを自動実行しない（GUI上で明示的な確認ダイアログを挟むこと）。
 - BDXL・M-DISCを専用のメディア種別として個別分岐しない（通常のBD/DVDと同じ経路で処理できるため、サイズベースの判定に任せる）。
-- `cdparanoia` に `-Z`（パラノイア無効化）を指定しない。誤り訂正・再読込を無効化してしまい「正確なリッピング」の要件を満たせなくなる。
+- `cd-paranoia` に `-Z`（パラノイア無効化）を指定しない。誤り訂正・再読込を無効化してしまい「正確なリッピング」の要件を満たせなくなる。
 - 音楽CDのトラック書き出しをCDDAFSマウント経由の単純なファイルコピーに戻さない（誤り訂正・検証ができず、過去の実装がまさにこの理由で置き換えられた）。
-- `cdparanoia`/`flac` が見つからない場合に、フォーマット変換をサイレントにスキップしたり、CDDAFSコピー等の低精度な代替手段に自動フォールバックしたりしない。GUI上で明確にエラー表示し、`brew install` を案内すること。
+- `cd-paranoia`/`flac` が見つからない場合に、フォーマット変換をサイレントにスキップしたり、CDDAFSコピー等の低精度な代替手段に自動フォールバックしたりしない。GUI上で明確にエラー表示し、`brew install` を案内すること。
+- `audio_cd._effective_path()` を「`PATH`が空の場合だけログインシェルを問い合わせる」実装に戻さない。GUI起動時も`PATH`は非空（launchdの最小値）になるため、その条件では常にHomebrewのコマンドが見つからなくなる。
+- `iso_builder.verify_iso()` を `subprocess.run`（完了を待ってから出力をまとめて渡す方式）に戻さない。検証中のGUI進捗表示が完了までフリーズしたように見える回帰になる。
+- 実行中のワーカースレッド（`IsoWorker`/`AudioRipWorker`）を残したままウィンドウを閉じられるようにしない（`MainWindow.closeEvent` のガードを外さない）。
 
 ## コミット/PR規約
 

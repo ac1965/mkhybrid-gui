@@ -15,6 +15,7 @@ from mkhybrid_gui import audio_cd
 from mkhybrid_gui.audio_cd import (
     AudioCdError,
     AudioFormat,
+    RipCancelled,
     RipTrackResult,
     build_convert_command,
     build_rip_command,
@@ -225,6 +226,62 @@ def test_missing_tools_empty_when_all_present(
     assert missing_tools(AudioFormat.ALAC) == []
 
 
+def test_effective_path_merges_shell_path_even_when_process_path_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """GUI起動時のようにPATHが最小限でも、ログインシェルのPATH
+    （Homebrewのインストール先を含む）を必ずマージすることを確認する。
+
+    以前は ``PATH`` が非空（launchdが設定する最小値でも常に非空）だと
+    ログインシェルへの問い合わせ自体をスキップしており、Homebrewの
+    パスが決して追加されないバグがあった。
+    """
+    audio_cd._effective_path.cache_clear()
+
+    monkeypatch.setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+    monkeypatch.setenv("SHELL", "/bin/zsh")
+
+    def fake_run(cmd, **kwargs):
+        class FakeCompletedProcess:
+            stdout = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin\n"
+
+        assert cmd[0] == "/bin/zsh"
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    try:
+        effective = audio_cd._effective_path()
+    finally:
+        audio_cd._effective_path.cache_clear()
+
+    entries = effective.split(":")
+
+    assert "/opt/homebrew/bin" in entries
+    assert "/usr/local/bin" in entries
+    # 重複したエントリ（両方に含まれる /usr/bin, /bin）は1つだけにする。
+    assert entries.count("/usr/bin") == 1
+    assert entries.count("/bin") == 1
+
+
+def test_effective_path_falls_back_to_process_path_when_shell_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    audio_cd._effective_path.cache_clear()
+
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+
+    def fake_run(cmd, **kwargs):
+        raise OSError("shell not found")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    try:
+        assert audio_cd._effective_path() == "/usr/bin:/bin"
+    finally:
+        audio_cd._effective_path.cache_clear()
+
+
 def test_command_environment_uses_effective_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -342,6 +399,11 @@ def test_rip_track_verified_falls_back_to_unverified_after_max_attempts(
         "Popen",
         _FakeRipPopen,
     )
+    monkeypatch.setattr(
+        audio_cd,
+        "_effective_path",
+        lambda: "/usr/bin:/bin",
+    )
 
     result = rip_track_verified(
         1,
@@ -367,6 +429,11 @@ def test_rip_track_verified_single_attempt_when_verify_disabled(
         subprocess,
         "Popen",
         _FakeRipPopen,
+    )
+    monkeypatch.setattr(
+        audio_cd,
+        "_effective_path",
+        lambda: "/usr/bin:/bin",
     )
 
     result = rip_track_verified(
@@ -396,6 +463,11 @@ def test_rip_track_verified_raises_when_every_attempt_fails(
         "Popen",
         _FailingPopen,
     )
+    monkeypatch.setattr(
+        audio_cd,
+        "_effective_path",
+        lambda: "/usr/bin:/bin",
+    )
 
     with pytest.raises(AudioCdError):
         rip_track_verified(
@@ -404,6 +476,160 @@ def test_rip_track_verified_raises_when_every_attempt_fails(
             verify=True,
             max_attempts=2,
         )
+
+
+# --- 安全な中断 -----------------------------------------------------------
+
+
+def test_rip_track_verified_raises_cancelled_before_starting_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """既にキャンセル要求が来ている場合、次の試行を開始せず即座に中断する。"""
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("キャンセル済みなのに外部コマンドを呼び出した")
+
+    monkeypatch.setattr(subprocess, "Popen", fail_if_called)
+
+    with pytest.raises(RipCancelled):
+        rip_track_verified(
+            1,
+            tmp_path,
+            verify=True,
+            cancel_check=lambda: True,
+        )
+
+
+def test_rip_track_verified_raises_cancelled_after_process_and_cleans_up(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """試行の実行中にキャンセルされた場合、途中経過のWAVを削除して中断する。"""
+    _FakeRipPopen._content_queue = [b"AAA"]
+    _FakeRipPopen.commands = []
+    _FakeRipPopen.environments = []
+
+    monkeypatch.setattr(subprocess, "Popen", _FakeRipPopen)
+    monkeypatch.setattr(
+        audio_cd,
+        "_effective_path",
+        lambda: "/usr/bin:/bin",
+    )
+
+    with pytest.raises(RipCancelled):
+        rip_track_verified(
+            1,
+            tmp_path,
+            verify=True,
+            cancel_check=lambda: True,
+        )
+
+    assert list(tmp_path.glob("*.wav")) == []
+
+
+def test_rip_and_convert_disc_stops_early_when_cancelled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """キャンセル要求後は以降のトラックを処理せず、cancelled=True を返す。"""
+
+    def fake_run(cmd, **kwargs):
+        class FakeCompletedProcess:
+            returncode = 0
+            stdout = SAMPLE_QUERY_OUTPUT
+            stderr = ""
+
+        return FakeCompletedProcess()
+
+    class _FakeEndToEndPopen:
+        def __init__(self, cmd, **kwargs):
+            output_path = Path(cmd[-1])
+            output_path.write_bytes(b"same-bytes")
+            self.stdout = iter([])
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", _FakeEndToEndPopen)
+    monkeypatch.setattr(
+        audio_cd,
+        "_effective_path",
+        lambda: "/opt/homebrew/bin:/usr/bin:/bin",
+    )
+
+    # SAMPLE_QUERY_OUTPUT には3トラックあるが、2トラック目の着手が
+    # 通知された時点でキャンセルする（1トラック目は完了させる）。
+    should_cancel = {"flag": False}
+
+    def on_progress(line: str) -> None:
+        if line.startswith("[2/3]"):
+            should_cancel["flag"] = True
+
+    def cancel_check() -> bool:
+        return should_cancel["flag"]
+
+    result = rip_and_convert_disc(
+        "/dev/rdisk4",
+        tmp_path / "out",
+        AudioFormat.WAV,
+        tmp_path / "work",
+        on_progress=on_progress,
+        verify=True,
+        cancel_check=cancel_check,
+    )
+
+    assert result.cancelled is True
+    assert len(result.tracks) == 1
+    assert result.failed_tracks == []
+
+
+def test_rip_and_convert_disc_reports_per_track_percent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """トラックごとの粗い進捗率がon_percentへ通知されることを確認する。"""
+
+    def fake_run(cmd, **kwargs):
+        class FakeCompletedProcess:
+            returncode = 0
+            stdout = SAMPLE_QUERY_OUTPUT
+            stderr = ""
+
+        return FakeCompletedProcess()
+
+    class _FakeEndToEndPopen:
+        def __init__(self, cmd, **kwargs):
+            output_path = Path(cmd[-1])
+            output_path.write_bytes(b"same-bytes")
+            self.stdout = iter([])
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", _FakeEndToEndPopen)
+    monkeypatch.setattr(
+        audio_cd,
+        "_effective_path",
+        lambda: "/opt/homebrew/bin:/usr/bin:/bin",
+    )
+
+    percents: list[int] = []
+
+    result = rip_and_convert_disc(
+        "/dev/rdisk4",
+        tmp_path / "out",
+        AudioFormat.WAV,
+        tmp_path / "work",
+        verify=True,
+        on_percent=percents.append,
+    )
+
+    assert result.cancelled is False
+    # SAMPLE_QUERY_OUTPUT は3トラック: 0%, 33%, 66% の後、完了で100%。
+    assert percents == [0, 33, 67, 100]
 
 
 # --- フォーマット変換の実行 -----------------------------------------------
@@ -446,6 +672,11 @@ def test_convert_audio_raises_on_failure(
         subprocess,
         "Popen",
         _FailingPopen,
+    )
+    monkeypatch.setattr(
+        audio_cd,
+        "_effective_path",
+        lambda: "/usr/bin:/bin",
     )
 
     with pytest.raises(AudioCdError):
