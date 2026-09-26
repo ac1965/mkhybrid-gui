@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QRadioButton,
     QVBoxLayout,
@@ -25,7 +26,6 @@ from PySide6.QtWidgets import (
 
 from mkhybrid_gui.audio_cd import AudioFormat, AudioRipWorker, missing_tools
 from mkhybrid_gui.disk_utils import (
-    DiskUtilError,
     MediaType,
     Volume,
     list_volumes,
@@ -104,14 +104,17 @@ class MainWindow(QMainWindow):
         audio_format_row = QHBoxLayout()
         self.audio_format_group = QButtonGroup(self)
         self._audio_format_buttons: dict[AudioFormat, QRadioButton] = {}
+
         for audio_format in _AUDIO_FORMAT_ORDER:
             label = audio_format.value
             if audio_format is AudioFormat.ALAC:
                 label += " ← 推奨"
+
             radio = QRadioButton(label)
             self.audio_format_group.addButton(radio)
             audio_format_row.addWidget(radio)
             self._audio_format_buttons[audio_format] = radio
+
         self._audio_format_buttons[AudioFormat.ALAC].setChecked(True)
         audio_format_row.addStretch(1)
         self.audio_format_label = QLabel("書き出し形式:")
@@ -130,6 +133,13 @@ class MainWindow(QMainWindow):
         self.start_button.clicked.connect(self._on_start_clicked)
         root_layout.addWidget(self.start_button)
 
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setVisible(False)
+        root_layout.addWidget(self.progress_bar)
+
         self.status_label = QLabel("待機中")
         root_layout.addWidget(self.status_label)
 
@@ -140,20 +150,28 @@ class MainWindow(QMainWindow):
     # -- ドライブ一覧 -------------------------------------------------
 
     def _refresh_volumes(self) -> None:
-        try:
-            self._volumes = list_volumes()
-        except DiskUtilError as exc:
-            QMessageBox.critical(self, "エラー", str(exc))
-            self._volumes = []
-
         self.device_combo.clear()
-        for volume in self._volumes:
-            self.device_combo.addItem(volume.display_name, userData=volume)
 
-        if not self._volumes:
-            self.device_combo.addItem("(利用可能なボリュームがありません)", userData=None)
+        try:
+            volumes = list_volumes()
+        except Exception as exc:
+            self.status_label.setText(str(exc))
+            return
 
-        self._on_device_changed(self.device_combo.currentIndex())
+        # マウント済みデバイスを最上部に表示する。
+        # mount_point が存在する = 現在マウントされているボリューム。
+        volumes.sort(
+            key=lambda volume: (
+                volume.mount_point is None,
+                volume.volume_name or volume.device_identifier,
+            )
+        )
+
+        for volume in volumes:
+            self.device_combo.addItem(
+                volume.volume_name or volume.device_identifier,
+                volume,
+            )
 
     def _on_device_changed(self, _index: int) -> None:
         volume: Volume | None = self.device_combo.currentData()
@@ -165,16 +183,22 @@ class MainWindow(QMainWindow):
         self.rock_checkbox.setVisible(not is_audio)
         self.udf_checkbox.setVisible(not is_audio)
         self.audio_format_label.setVisible(is_audio)
+
         for radio in self._audio_format_buttons.values():
             radio.setVisible(is_audio)
+
         self.verify_checkbox.setVisible(is_audio)
         self.start_button.setText(
-            "オーディオトラックを書き出す" if is_audio else "ISOイメージを作成"
+            "オーディオトラックを書き出す"
+            if is_audio
+            else "ISOイメージを作成"
         )
 
         if volume is not None and not is_audio:
             # DVD/Blu-ray（BDXL・M-DISCを含む）は大容量ファイルを含みうるためUDFを既定でON
-            self.udf_checkbox.setChecked(volume.media_type in (MediaType.DVD, MediaType.BD))
+            self.udf_checkbox.setChecked(
+                volume.media_type in (MediaType.DVD, MediaType.BD)
+            )
 
         self.media_info_label.setText(
             f"検出されたメディア種別: {volume.media_type.value}"
@@ -187,11 +211,18 @@ class MainWindow(QMainWindow):
         is_audio = volume is not None and volume.media_type == MediaType.CD_AUDIO
 
         if is_audio:
-            path = QFileDialog.getExistingDirectory(self, "出力先フォルダを選択")
+            path = QFileDialog.getExistingDirectory(
+                self,
+                "出力先フォルダを選択",
+            )
         else:
             path, _ = QFileDialog.getSaveFileName(
-                self, "出力先ISOファイルを選択", "", "ISOイメージ (*.iso)"
+                self,
+                "出力先ISOファイルを選択",
+                "",
+                "ISOイメージ (*.iso)",
             )
+
             if path and not path.endswith(".iso"):
                 path += ".iso"
 
@@ -202,14 +233,20 @@ class MainWindow(QMainWindow):
         for audio_format, radio in self._audio_format_buttons.items():
             if radio.isChecked():
                 return audio_format
+
         return AudioFormat.ALAC
 
     # -- 実行 ---------------------------------------------------------
 
     def _on_start_clicked(self) -> None:
         volume: Volume | None = self.device_combo.currentData()
+
         if volume is None:
-            QMessageBox.warning(self, "選択エラー", "作成元のボリュームを選択してください。")
+            QMessageBox.warning(
+                self,
+                "選択エラー",
+                "作成元のボリュームを選択してください。",
+            )
             return
 
         if volume.media_type == MediaType.CD_AUDIO:
@@ -219,8 +256,13 @@ class MainWindow(QMainWindow):
 
     def _start_iso_build(self, volume: Volume) -> None:
         output_text = self.output_edit.text().strip()
+
         if not output_text:
-            QMessageBox.warning(self, "入力エラー", "出力先ISOファイルを指定してください。")
+            QMessageBox.warning(
+                self,
+                "入力エラー",
+                "出力先ISOファイルを指定してください。",
+            )
             return
 
         options = IsoOptions(
@@ -228,6 +270,7 @@ class MainWindow(QMainWindow):
             rock=self.rock_checkbox.isChecked(),
             udf=self.udf_checkbox.isChecked(),
         )
+
         if not (options.joliet or options.rock or options.udf):
             QMessageBox.warning(
                 self,
@@ -237,13 +280,16 @@ class MainWindow(QMainWindow):
             return
 
         output_path = Path(output_text)
+
         if output_path.exists():
             reply = QMessageBox.question(
                 self,
                 "確認",
                 f"{output_path} は既に存在します。上書きしますか？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
             )
+
             if reply != QMessageBox.StandardButton.Yes:
                 return
 
@@ -252,24 +298,40 @@ class MainWindow(QMainWindow):
         self._is_audio_job = False
         self.log_view.clear()
         self.status_label.setText("ISOイメージを作成しています…")
+        self._start_progress_indicator()
         self._set_controls_enabled(False)
 
-        worker = IsoWorker(source, output_path, options, parent=self)
+        worker = IsoWorker(
+            source,
+            output_path,
+            options,
+            parent=self,
+        )
+
         worker.progress.connect(self._on_progress)
+        worker.progress_percent.connect(self._on_progress_percent)
         worker.finished_ok.connect(self._on_finished)
+
         self._worker = worker
         worker.start()
 
     def _start_audio_rip(self, volume: Volume) -> None:
         dest_text = self.output_edit.text().strip()
+
         if not dest_text:
-            QMessageBox.warning(self, "入力エラー", "出力先フォルダを指定してください。")
+            QMessageBox.warning(
+                self,
+                "入力エラー",
+                "出力先フォルダを指定してください。",
+            )
             return
 
         audio_format = self._selected_audio_format()
         missing = missing_tools(audio_format)
+
         if missing:
             tools = " ".join(missing)
+
             QMessageBox.critical(
                 self,
                 "外部ツールが不足しています",
@@ -279,22 +341,29 @@ class MainWindow(QMainWindow):
             return
 
         dest_path = Path(dest_text)
+
         if dest_path.exists() and any(dest_path.iterdir()):
             reply = QMessageBox.question(
                 self,
                 "確認",
                 f"{dest_path} は空ではありません。同名ファイルは上書きされます。続行しますか？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
             )
+
             if reply != QMessageBox.StandardButton.Yes:
                 return
 
         self._is_audio_job = True
         self.log_view.clear()
         self.status_label.setText("オーディオトラックを書き出しています…")
+        self._start_progress_indicator()
         self._set_controls_enabled(False)
 
-        self._audio_work_tmpdir = tempfile.TemporaryDirectory(prefix="mkhybrid-gui-rip-")
+        self._audio_work_tmpdir = tempfile.TemporaryDirectory(
+            prefix="mkhybrid-gui-rip-"
+        )
+
         device = whole_disk_raw_device(volume.device_identifier)
 
         worker = AudioRipWorker(
@@ -305,10 +374,22 @@ class MainWindow(QMainWindow):
             verify=self.verify_checkbox.isChecked(),
             parent=self,
         )
+
         worker.progress.connect(self._on_progress)
         worker.finished_ok.connect(self._on_finished)
+
         self._worker = worker
         worker.start()
+
+    def _start_progress_indicator(self) -> None:
+        """処理開始時に進捗バーを表示する。"""
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(True)
+
+    def _on_progress_percent(self, percent: int) -> None:
+        """ワーカーから受信した実進捗率を表示する。"""
+        self.progress_bar.setValue(max(0, min(percent, 100)))
 
     def _set_controls_enabled(self, enabled: bool) -> None:
         self.start_button.setEnabled(enabled)
@@ -319,16 +400,26 @@ class MainWindow(QMainWindow):
         self.joliet_checkbox.setEnabled(enabled)
         self.rock_checkbox.setEnabled(enabled)
         self.udf_checkbox.setEnabled(enabled)
+
         for radio in self._audio_format_buttons.values():
             radio.setEnabled(enabled)
+
         self.verify_checkbox.setEnabled(enabled)
 
     def _on_progress(self, line: str) -> None:
         self.log_view.appendPlainText(line)
 
     def _on_finished(self, ok: bool, message: str) -> None:
+        if ok:
+            self.progress_bar.setValue(100)
+
+        self.progress_bar.setVisible(False)
+
         self._set_controls_enabled(True)
-        self.status_label.setText(message if ok else f"エラー: {message}")
+        self.status_label.setText(
+            message if ok else f"エラー: {message}"
+        )
+
         if ok:
             QMessageBox.information(self, "完了", message)
         elif self._is_audio_job:
@@ -341,6 +432,7 @@ class MainWindow(QMainWindow):
                 "コピーガード付きメディア等、セクタ単位の読み取りが必要な場合は"
                 "対応できません。専用ツールの利用をご検討ください。",
             )
+
         self._worker = None
 
         if self._is_audio_job and self._audio_work_tmpdir is not None:

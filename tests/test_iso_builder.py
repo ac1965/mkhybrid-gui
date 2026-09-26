@@ -26,7 +26,6 @@ def test_build_makehybrid_command_default_options() -> None:
         "makehybrid",
         "-iso",
         "-joliet",
-        "-rock",
         "-o",
         "/tmp/out.iso",
         "/Volumes/SAMPLE_CD",
@@ -35,7 +34,9 @@ def test_build_makehybrid_command_default_options() -> None:
 
 def test_build_makehybrid_command_joliet_only() -> None:
     cmd = build_makehybrid_command(
-        "/Volumes/SAMPLE_CD", "/tmp/out.iso", IsoOptions(joliet=True, rock=False)
+        "/Volumes/SAMPLE_CD",
+        "/tmp/out.iso",
+        IsoOptions(joliet=True, rock=False),
     )
 
     assert "-rock" not in cmd
@@ -46,15 +47,37 @@ def test_build_makehybrid_command_joliet_and_rock_off_keeps_plain_iso() -> None:
     # -iso はデフォルトで有効なため、Joliet/Rockを両方OFFにしても
     # 素のISO9660イメージとして有効なコマンドになる。
     cmd = build_makehybrid_command(
-        "/Volumes/SAMPLE_CD", "/tmp/out.iso", IsoOptions(joliet=False, rock=False)
+        "/Volumes/SAMPLE_CD",
+        "/tmp/out.iso",
+        IsoOptions(joliet=False, rock=False),
     )
 
-    assert cmd == ["hdiutil", "makehybrid", "-iso", "-o", "/tmp/out.iso", "/Volumes/SAMPLE_CD"]
+    assert cmd == [
+        "hdiutil",
+        "makehybrid",
+        "-iso",
+        "-o",
+        "/tmp/out.iso",
+        "/Volumes/SAMPLE_CD",
+    ]
+
+
+def test_build_makehybrid_command_rock_option_is_not_passed_to_hdiutil() -> None:
+    cmd = build_makehybrid_command(
+        "/Volumes/SAMPLE_CD",
+        "/tmp/out.iso",
+        IsoOptions(rock=True),
+    )
+
+    assert "-rock" not in cmd
+    assert "-iso" in cmd
 
 
 def test_build_makehybrid_command_udf_for_dvd_bd() -> None:
     cmd = build_makehybrid_command(
-        "/Volumes/SAMPLE_DVD", "/tmp/out.iso", IsoOptions(udf=True)
+        "/Volumes/SAMPLE_DVD",
+        "/tmp/out.iso",
+        IsoOptions(udf=True),
     )
 
     assert cmd == [
@@ -62,7 +85,6 @@ def test_build_makehybrid_command_udf_for_dvd_bd() -> None:
         "makehybrid",
         "-iso",
         "-joliet",
-        "-rock",
         "-udf",
         "-o",
         "/tmp/out.iso",
@@ -75,25 +97,42 @@ def test_build_makehybrid_command_rejects_no_format() -> None:
         build_makehybrid_command(
             "/Volumes/SAMPLE_CD",
             "/tmp/out.iso",
-            IsoOptions(iso=False, joliet=False, rock=False, udf=False),
+            IsoOptions(
+                iso=False,
+                joliet=False,
+                rock=False,
+                udf=False,
+            ),
         )
 
 
 def test_build_makehybrid_command_preserves_paths_with_spaces() -> None:
-    cmd = build_makehybrid_command("/Volumes/My CD", "/tmp/日本語 出力.iso")
+    cmd = build_makehybrid_command(
+        "/Volumes/My CD",
+        "/tmp/日本語 出力.iso",
+    )
 
     assert "/Volumes/My CD" in cmd
     assert "/tmp/日本語 出力.iso" in cmd
 
 
 def test_build_verify_command() -> None:
-    assert build_verify_command("/tmp/out.iso") == ["hdiutil", "verify", "/tmp/out.iso"]
+    assert build_verify_command("/tmp/out.iso") == [
+        "hdiutil",
+        "verify",
+        "/tmp/out.iso",
+    ]
 
 
 class _FakePopen:
     def __init__(self, cmd, **kwargs):
         self.cmd = cmd
-        self.stdout = iter(["Creating hybrid image...\n", "done\n"])
+        self.stdout = iter(
+            [
+                "Creating hybrid image...\n",
+                "done\n",
+            ]
+        )
         self._returncode = 0
 
     def wait(self) -> int:
@@ -107,20 +146,30 @@ def test_run_makehybrid_streams_progress_and_returns_result(
 
     lines: list[str] = []
     result = run_makehybrid(
-        "/Volumes/SAMPLE_CD", "/tmp/out.iso", on_progress=lines.append
+        "/Volumes/SAMPLE_CD",
+        "/tmp/out.iso",
+        on_progress=lines.append,
     )
 
     assert result.ok is True
-    assert lines == ["Creating hybrid image...", "done"]
+    assert lines == [
+        "Creating hybrid image...",
+        "done",
+    ]
 
 
 def test_verify_iso_success(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeCompletedProcess:
         returncode = 0
+        stdout = ""
         stderr = ""
 
     def fake_run(cmd, **kwargs):
-        assert cmd == ["hdiutil", "verify", "/tmp/out.iso"]
+        assert cmd == [
+            "hdiutil",
+            "verify",
+            "/tmp/out.iso",
+        ]
         return FakeCompletedProcess()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -132,9 +181,15 @@ def test_verify_iso_success(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_verify_iso_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeCompletedProcess:
         returncode = 1
+        stdout = ""
         stderr = "checksum mismatch"
 
     def fake_run(cmd, **kwargs):
+        assert cmd == [
+            "hdiutil",
+            "verify",
+            "/tmp/out.iso",
+        ]
         return FakeCompletedProcess()
 
     monkeypatch.setattr(subprocess, "run", fake_run)
