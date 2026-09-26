@@ -5,18 +5,22 @@ macOSのCDDAFSマウント（各トラックが仮想的なAIFFファイルと�
 ため「正確なリッピング」の要件を満たせない。本モジュールはEAC/XLD相当の精度を得る
 ため、以下の外部ツール（Homebrew経由でインストール）に依存する。
 
-    brew install cdparanoia flac
+    brew install libcdio-paranoia flac
 
-- **読み取り・誤り訂正・再読込**: ``cdparanoia`` をパラノイアモード（既定、``-Z`` を
+- **読み取り・誤り訂正・再読込**: ``cd-paranoia`` をパラノイアモード（既定、``-Z`` を
   渡さない）で実行する。ドライブのジッター補正・C2エラー利用・セクタ単位の
-  再読込はcdparanoia自体が内部で行う。
+  再読込はcd-paranoia自体が内部で行う。
 - **検証**: 1トラックを独立して複数回（既定2回、一致しなければ最大 ``max_attempts``
   回まで）リッピングし、得られたWAVのSHA-256チェックサムが一致するかどうかで
   「検証済み」を判定する。一致しない場合は最後の読み取り結果を「未検証」として
   採用し、GUI側に警告として報告する。
-- **フォーマット変換**: cdparanoiaの出力（WAV/PCM）を、macOS標準の ``afconvert``
+- **フォーマット変換**: cd-paranoiaの出力（WAV/PCM）を、macOS標準の ``afconvert``
   （ALAC/AIFF/AAC）または ``flac`` コマンド（FLAC）でユーザー選択の形式に変換する。
   WAVはそのまま採用する（変換不要）。
+
+外部コマンドは固定されたHomebrewパスを直接参照せず、アプリケーションの実行環境の
+PATHを使用する。Terminalから起動した場合はそのPATHをそのまま利用し、Finder等から
+起動した場合はログインシェルからPATHを取得する。
 
 コマンド組み立てと同様、ロジックはUIフレームワークに依存しない関数として実装し、
 GUIからの非同期実行のみ ``AudioRipWorker``（QThread）が担う。
@@ -25,12 +29,14 @@ GUIからの非同期実行のみ ``AudioRipWorker``（QThread）が担う。
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import shutil
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
+from functools import lru_cache
 from pathlib import Path
 
 ProgressCallback = Callable[[str], None]
@@ -60,14 +66,62 @@ _FILE_EXTENSIONS: dict[AudioFormat, str] = {
     AudioFormat.AAC: ".m4a",
 }
 
-# フォーマットごとに必要な外部コマンド。cdparanoiaは全フォーマット共通で必須。
+# フォーマットごとに必要な外部コマンド。
+# cd-paranoia は全フォーマット共通で必須。
 REQUIRED_TOOLS: dict[AudioFormat, tuple[str, ...]] = {
-    AudioFormat.ALAC: ("cdparanoia", "afconvert"),
-    AudioFormat.AIFF: ("cdparanoia", "afconvert"),
-    AudioFormat.FLAC: ("cdparanoia", "flac"),
-    AudioFormat.WAV: ("cdparanoia",),
-    AudioFormat.AAC: ("cdparanoia", "afconvert"),
+    AudioFormat.ALAC: ("cd-paranoia", "afconvert"),
+    AudioFormat.AIFF: ("cd-paranoia", "afconvert"),
+    AudioFormat.FLAC: ("cd-paranoia", "flac"),
+    AudioFormat.WAV: ("cd-paranoia",),
+    AudioFormat.AAC: ("cd-paranoia", "afconvert"),
 }
+
+
+@lru_cache(maxsize=1)
+def _effective_path() -> str:
+    """外部コマンド実行に使用するPATHを取得する。
+
+    Terminalから起動された場合は、そのプロセスのPATHをそのまま利用する。
+    Finder等から起動され、PATHに必要なコマンドが含まれていない場合は、
+    ログインシェルからPATHを取得する。
+
+    Homebrewのインストール先などをアプリケーション側で固定しないため、
+    外部コマンドは常にこのPATHを通して検索・実行する。
+    """
+    current_path = os.environ.get("PATH", "")
+
+    # Terminal起動時など、すでに必要なPATHが設定されている場合は
+    # シェルを起動する必要がない。
+    if current_path:
+        return current_path
+
+    shell = os.environ.get("SHELL", "/bin/zsh")
+
+    try:
+        result = subprocess.run(
+            [shell, "-lc", 'printf "%s" "$PATH"'],
+            capture_output=True,
+            text=True,
+            check=True,
+            env=os.environ.copy(),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return current_path
+
+    shell_path = result.stdout.strip()
+    return shell_path or current_path
+
+
+def _tool_path(tool: str) -> str | None:
+    """現在の実行環境で利用可能な外部コマンドのパスを返す。"""
+    return shutil.which(tool, path=_effective_path())
+
+
+def _command_env() -> dict[str, str]:
+    """外部コマンド実行用の環境変数を返す。"""
+    env = os.environ.copy()
+    env["PATH"] = _effective_path()
+    return env
 
 
 def output_extension(audio_format: AudioFormat) -> str:
@@ -77,7 +131,11 @@ def output_extension(audio_format: AudioFormat) -> str:
 
 def missing_tools(audio_format: AudioFormat) -> list[str]:
     """指定フォーマットの処理に必要な外部コマンドのうち、未インストールのものを返す。"""
-    return [tool for tool in REQUIRED_TOOLS[audio_format] if shutil.which(tool) is None]
+    return [
+        tool
+        for tool in REQUIRED_TOOLS[audio_format]
+        if _tool_path(tool) is None
+    ]
 
 
 @dataclass(frozen=True)
@@ -92,45 +150,75 @@ class CommandResult:
         return self.returncode == 0
 
 
-def _run_streaming(cmd: list[str], on_progress: ProgressCallback | None) -> CommandResult:
+def _run_streaming(
+    cmd: list[str],
+    on_progress: ProgressCallback | None,
+) -> CommandResult:
+    """外部コマンドをPATH引き継ぎ環境で実行する。"""
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        env=_command_env(),
     )
+
     lines: list[str] = []
     assert proc.stdout is not None
+
     for line in proc.stdout:
         lines.append(line)
         if on_progress is not None:
             on_progress(line.rstrip("\n"))
+
     returncode = proc.wait()
-    return CommandResult(returncode=returncode, output="".join(lines))
+
+    return CommandResult(
+        returncode=returncode,
+        output="".join(lines),
+    )
 
 
 # --- トラック数の取得 -------------------------------------------------
 
 
 def parse_track_count(query_output: str) -> int:
-    """``cdparanoia -Q`` の出力（標準エラー）からオーディオトラック数を求める。"""
+    """``cd-paranoia -Q`` の出力（標準エラー）からオーディオトラック数を求める。"""
     track_numbers = {
         int(match.group(1))
         for line in query_output.splitlines()
         if (match := _TRACK_LINE_RE.match(line))
     }
+
     if not track_numbers:
-        raise AudioCdError("音楽CDのトラック情報を取得できませんでした（cdparanoia -Q）。")
+        raise AudioCdError(
+            "音楽CDのトラック情報を取得できませんでした（cd-paranoia -Q）。"
+        )
+
     return max(track_numbers)
 
 
 def query_track_count(device: str | None = None) -> int:
-    """``cdparanoia -Q`` を実行し、オーディオトラック数を取得する。"""
-    cmd = ["cdparanoia", "-Q"]
+    """``cd-paranoia -Q`` を実行し、オーディオトラック数を取得する。"""
+    cmd = ["cd-paranoia", "-Q"]
+
     if device:
         cmd += ["-d", device]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    # cdparanoia -Q は正常時でも終了コードが0以外になることがあるため、
+
+    if _tool_path("cd-paranoia") is None:
+        raise AudioCdError(
+            "cd-paranoia が見つかりません。PATHを確認してください。"
+        )
+
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_command_env(),
+    )
+
+    # cd-paranoia -Q は正常時でも終了コードが0以外になることがあるため、
     # 終了コードではなく出力内容の解析可否で成否を判定する。
     return parse_track_count(result.stderr + result.stdout)
 
@@ -139,25 +227,32 @@ def query_track_count(device: str | None = None) -> int:
 
 
 def build_rip_command(
-    track_number: int, output_wav: Path, device: str | None = None
+    track_number: int,
+    output_wav: Path,
+    device: str | None = None,
 ) -> list[str]:
-    """``cdparanoia`` の1トラック分リッピングコマンドを組み立てる。
+    """``cd-paranoia`` の1トラック分リッピングコマンドを組み立てる。
 
-    ``-Z``（パラノイア無効化）は意図的に指定しない。これによりcdparanoia既定の
+    ``-Z``（パラノイア無効化）は意図的に指定しない。これによりcd-paranoia既定の
     ジッター補正・誤り訂正・セクタ単位の再読込が常に有効になる。
     """
-    cmd = ["cdparanoia"]
+    cmd = ["cd-paranoia"]
+
     if device:
         cmd += ["-d", device]
+
     cmd += [str(track_number), str(output_wav)]
+
     return cmd
 
 
 def _sha256_of_file(path: Path) -> str:
     digest = hashlib.sha256()
+
     with path.open("rb") as fh:
         for chunk in iter(lambda: fh.read(1024 * 1024), b""):
             digest.update(chunk)
+
     return digest.hexdigest()
 
 
@@ -180,10 +275,10 @@ def rip_track_verified(
     verify: bool = True,
     max_attempts: int = 3,
 ) -> RipTrackResult:
-    """トラックをcdparanoiaでリッピングし、独立した複数回の読み取り結果が
+    """トラックをcd-paranoiaでリッピングし、独立した複数回の読み取り結果が
     一致するかどうかで検証する。
 
-    ``verify`` がFalseの場合は1回だけ読み取り、cdparanoia自身の誤り訂正・
+    ``verify`` がFalseの場合は1回だけ読み取り、cd-paranoia自身の誤り訂正・
     再読込のみに頼る（検証は行わない）。
     """
     attempts_needed = max_attempts if verify else 1
@@ -191,37 +286,53 @@ def rip_track_verified(
 
     for attempt in range(1, attempts_needed + 1):
         wav_path = work_dir / f"track{track_number:02d}.attempt{attempt}.wav"
+
         if on_progress is not None:
             label = f"（{attempt}回目）" if verify else ""
-            on_progress(f"トラック{track_number}: 読み取り中{label}…")
+            on_progress(
+                f"トラック{track_number}: 読み取り中{label}…"
+            )
 
         result = _run_streaming(
-            build_rip_command(track_number, wav_path, device), on_progress
+            build_rip_command(track_number, wav_path, device),
+            on_progress,
         )
+
         if not result.ok or not wav_path.exists():
             continue
 
         if not verify:
             return RipTrackResult(
-                track_number=track_number, wav_path=wav_path, verified=False, attempts=1
+                track_number=track_number,
+                wav_path=wav_path,
+                verified=False,
+                attempts=1,
             )
 
         checksum = _sha256_of_file(wav_path)
+
         for other_path, other_checksum in seen:
             if other_checksum == checksum:
                 if on_progress is not None:
-                    on_progress(f"トラック{track_number}: 読み取り結果が一致し検証されました。")
+                    on_progress(
+                        f"トラック{track_number}: "
+                        "読み取り結果が一致し検証されました。"
+                    )
+
                 if wav_path != other_path:
                     wav_path.unlink(missing_ok=True)
+
                 for stale_path, _ in seen:
                     if stale_path != other_path:
                         stale_path.unlink(missing_ok=True)
+
                 return RipTrackResult(
                     track_number=track_number,
                     wav_path=other_path,
                     verified=True,
                     attempts=attempt,
                 )
+
         seen.append((wav_path, checksum))
 
     if seen:
@@ -230,27 +341,55 @@ def rip_track_verified(
                 f"警告: トラック{track_number}は{len(seen)}回読み取っても一致せず、"
                 "未検証のまま採用します。"
             )
+
         kept_path, _ = seen[-1]
+
         for stale_path, _ in seen[:-1]:
             stale_path.unlink(missing_ok=True)
+
         return RipTrackResult(
-            track_number=track_number, wav_path=kept_path, verified=False, attempts=len(seen)
+            track_number=track_number,
+            wav_path=kept_path,
+            verified=False,
+            attempts=len(seen),
         )
 
-    raise AudioCdError(f"トラック{track_number}のリッピングに失敗しました。")
+    raise AudioCdError(
+        f"トラック{track_number}のリッピングに失敗しました。"
+    )
 
 
 # --- フォーマット変換 ---------------------------------------------------
 
 
 def build_convert_command(
-    source_wav: Path, target_path: Path, audio_format: AudioFormat
+    source_wav: Path,
+    target_path: Path,
+    audio_format: AudioFormat,
 ) -> list[str]:
     """WAVを指定フォーマットへ変換するコマンドを組み立てる。WAVは変換不要のため対象外。"""
     if audio_format == AudioFormat.ALAC:
-        return ["afconvert", "-f", "m4af", "-d", "alac", str(source_wav), str(target_path)]
+        return [
+            "afconvert",
+            "-f",
+            "m4af",
+            "-d",
+            "alac",
+            str(source_wav),
+            str(target_path),
+        ]
+
     if audio_format == AudioFormat.AIFF:
-        return ["afconvert", "-f", "AIFF", "-d", "BEI16", str(source_wav), str(target_path)]
+        return [
+            "afconvert",
+            "-f",
+            "AIFF",
+            "-d",
+            "BEI16",
+            str(source_wav),
+            str(target_path),
+        ]
+
     if audio_format == AudioFormat.AAC:
         return [
             "afconvert",
@@ -263,8 +402,17 @@ def build_convert_command(
             str(source_wav),
             str(target_path),
         ]
+
     if audio_format == AudioFormat.FLAC:
-        return ["flac", "--silent", "--force", "-o", str(target_path), str(source_wav)]
+        return [
+            "flac",
+            "--silent",
+            "--force",
+            "-o",
+            str(target_path),
+            str(source_wav),
+        ]
+
     raise ValueError(f"変換不要なフォーマットです: {audio_format}")
 
 
@@ -279,10 +427,19 @@ def convert_audio(
         shutil.copyfile(source_wav, target_path)
         return
 
-    cmd = build_convert_command(source_wav, target_path, audio_format)
+    cmd = build_convert_command(
+        source_wav,
+        target_path,
+        audio_format,
+    )
+
     result = _run_streaming(cmd, on_progress)
+
     if not result.ok:
-        raise AudioCdError(f"フォーマット変換に失敗しました（{audio_format.value}）: {result.output}")
+        raise AudioCdError(
+            f"フォーマット変換に失敗しました（{audio_format.value}）: "
+            f"{result.output}"
+        )
 
 
 # --- ディスク全体のリッピング -------------------------------------------
@@ -308,7 +465,11 @@ class RipResult:
 
     @property
     def unverified_tracks(self) -> list[int]:
-        return [t.track_number for t in self.tracks if not t.verified]
+        return [
+            track.track_number
+            for track in self.tracks
+            if not track.verified
+        ]
 
 
 def rip_and_convert_disc(
@@ -321,9 +482,12 @@ def rip_and_convert_disc(
     verify: bool = True,
     max_attempts: int = 3,
 ) -> RipResult:
-    """音楽CDの全トラックをリッピングし、指定フォーマットで ``destination_dir`` に書き出す。"""
+    """音楽CDの全トラックをリッピングし、指定フォーマットで
+    ``destination_dir`` に書き出す。
+    """
     dest = Path(destination_dir)
     dest.mkdir(parents=True, exist_ok=True)
+
     work = Path(work_dir)
     work.mkdir(parents=True, exist_ok=True)
 
@@ -334,7 +498,11 @@ def rip_and_convert_disc(
 
     for track_number in range(1, track_count + 1):
         if on_progress is not None:
-            on_progress(f"[{track_number}/{track_count}] トラック{track_number}を処理しています…")
+            on_progress(
+                f"[{track_number}/{track_count}] "
+                f"トラック{track_number}を処理しています…"
+            )
+
         try:
             rip_result = rip_track_verified(
                 track_number,
@@ -348,9 +516,18 @@ def rip_and_convert_disc(
             failed.append((track_number, str(exc)))
             continue
 
-        target = dest / f"Track{track_number:02d}{output_extension(audio_format)}"
+        target = (
+            dest
+            / f"Track{track_number:02d}{output_extension(audio_format)}"
+        )
+
         try:
-            convert_audio(rip_result.wav_path, target, audio_format, on_progress)
+            convert_audio(
+                rip_result.wav_path,
+                target,
+                audio_format,
+                on_progress,
+            )
         except AudioCdError as exc:
             failed.append((track_number, str(exc)))
             continue
@@ -358,15 +535,22 @@ def rip_and_convert_disc(
             rip_result.wav_path.unlink(missing_ok=True)
 
         tracks.append(
-            TrackOutcome(track_number=track_number, output_path=target, verified=rip_result.verified)
+            TrackOutcome(
+                track_number=track_number,
+                output_path=target,
+                verified=rip_result.verified,
+            )
         )
 
-    return RipResult(tracks=tracks, failed_tracks=failed)
+    return RipResult(
+        tracks=tracks,
+        failed_tracks=failed,
+    )
 
 
 try:
     from PySide6.QtCore import QThread, Signal
-except ImportError:  # pragma: no cover - PySide6未インストール時はAudioRipWorkerを提供しない
+except ImportError:  # pragma: no cover - PySide6未インストール時
     QThread = None  # type: ignore[assignment,misc]
 
 
@@ -409,12 +593,26 @@ if QThread is not None:
                 return
 
             if not result.ok:
-                details = "; ".join(f"トラック{n}: {msg}" for n, msg in result.failed_tracks)
-                self.finished_ok.emit(False, f"一部のトラックの処理に失敗しました: {details}")
+                details = "; ".join(
+                    f"トラック{number}: {message}"
+                    for number, message in result.failed_tracks
+                )
+                self.finished_ok.emit(
+                    False,
+                    f"一部のトラックの処理に失敗しました: {details}",
+                )
                 return
 
             message = f"{len(result.tracks)}曲を書き出しました。"
+
             if self._verify and result.unverified_tracks:
-                unverified = "、".join(str(n) for n in result.unverified_tracks)
-                message += f"（トラック{unverified}は複数回読み取っても一致せず未検証です）"
+                unverified = "、".join(
+                    str(number)
+                    for number in result.unverified_tracks
+                )
+                message += (
+                    f"（トラック{unverified}は複数回読み取っても"
+                    "一致せず未検証です）"
+                )
+
             self.finished_ok.emit(True, message)

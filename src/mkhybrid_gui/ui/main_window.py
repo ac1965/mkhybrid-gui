@@ -42,6 +42,13 @@ _AUDIO_FORMAT_ORDER = [
     AudioFormat.AAC,
 ]
 
+# 実行コマンド名とHomebrewパッケージ名の対応。
+# cd-paranoia は libcdio-paranoia パッケージから提供される。
+_BREW_PACKAGES = {
+    "cd-paranoia": "libcdio-paranoia",
+    "flac": "flac",
+}
+
 
 class MainWindow(QMainWindow):
     """アプリケーションのメインウィンドウ。"""
@@ -331,12 +338,27 @@ class MainWindow(QMainWindow):
 
         if missing:
             tools = " ".join(missing)
+            brew_packages = [
+                _BREW_PACKAGES[tool]
+                for tool in missing
+                if tool in _BREW_PACKAGES
+            ]
+
+            message = (
+                f"{audio_format.value} の書き出しには次のコマンドが必要です: "
+                f"{tools}"
+            )
+
+            if brew_packages:
+                message += (
+                    "\n\nHomebrewでインストールしてください:\n"
+                    f"  brew install {' '.join(brew_packages)}"
+                )
 
             QMessageBox.critical(
                 self,
                 "外部ツールが不足しています",
-                f"{audio_format.value} の書き出しには次のコマンドが必要です: {tools}\n\n"
-                f"Homebrewでインストールしてください:\n  brew install {tools}",
+                message,
             )
             return
 

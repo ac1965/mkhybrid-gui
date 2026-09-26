@@ -1,7 +1,7 @@
 """``audio_cd`` のトラック数取得・リッピング検証・フォーマット変換のテスト。
 
-実際の音楽CDやcdparanoia/afconvert/flacバイナリは使用せず、``subprocess`` を
-モック化して検証する。
+実際の音楽CDやcd-paranoia/afconvert/flacバイナリは使用せず、
+``subprocess`` をモック化して検証する。
 """
 
 from __future__ import annotations
@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from mkhybrid_gui import audio_cd
 from mkhybrid_gui.audio_cd import (
     AudioCdError,
     AudioFormat,
@@ -55,38 +56,89 @@ def test_parse_track_count_no_tracks_raises() -> None:
 
 def test_build_rip_command_without_device() -> None:
     cmd = build_rip_command(1, Path("/tmp/track01.wav"))
-    assert cmd == ["cdparanoia", "1", "/tmp/track01.wav"]
+    assert cmd == ["cd-paranoia", "1", "/tmp/track01.wav"]
 
 
 def test_build_rip_command_with_device() -> None:
-    cmd = build_rip_command(2, Path("/tmp/track02.wav"), device="/dev/rdisk4")
-    assert cmd == ["cdparanoia", "-d", "/dev/rdisk4", "2", "/tmp/track02.wav"]
+    cmd = build_rip_command(
+        2,
+        Path("/tmp/track02.wav"),
+        device="/dev/rdisk4",
+    )
+    assert cmd == [
+        "cd-paranoia",
+        "-d",
+        "/dev/rdisk4",
+        "2",
+        "/tmp/track02.wav",
+    ]
 
 
 def test_build_rip_command_never_disables_paranoia() -> None:
-    # -Z（パラノイア無効化）は誤り訂正・再読込を無効にしてしまうため、常に含まれてはならない
-    cmd = build_rip_command(1, Path("/tmp/track01.wav"))
+    # -Z（パラノイア無効化）は誤り訂正・再読込を無効にしてしまうため、
+    # 常に含まれてはならない。
+    cmd = build_rip_command(
+        1,
+        Path("/tmp/track01.wav"),
+    )
     assert "-Z" not in cmd
 
 
 def test_build_convert_command_alac() -> None:
-    cmd = build_convert_command(Path("in.wav"), Path("out.m4a"), AudioFormat.ALAC)
-    assert cmd == ["afconvert", "-f", "m4af", "-d", "alac", "in.wav", "out.m4a"]
+    cmd = build_convert_command(
+        Path("in.wav"),
+        Path("out.m4a"),
+        AudioFormat.ALAC,
+    )
+    assert cmd == [
+        "afconvert",
+        "-f",
+        "m4af",
+        "-d",
+        "alac",
+        "in.wav",
+        "out.m4a",
+    ]
 
 
 def test_build_convert_command_aiff() -> None:
-    cmd = build_convert_command(Path("in.wav"), Path("out.aiff"), AudioFormat.AIFF)
-    assert cmd == ["afconvert", "-f", "AIFF", "-d", "BEI16", "in.wav", "out.aiff"]
+    cmd = build_convert_command(
+        Path("in.wav"),
+        Path("out.aiff"),
+        AudioFormat.AIFF,
+    )
+    assert cmd == [
+        "afconvert",
+        "-f",
+        "AIFF",
+        "-d",
+        "BEI16",
+        "in.wav",
+        "out.aiff",
+    ]
 
 
 def test_build_convert_command_aac() -> None:
-    cmd = build_convert_command(Path("in.wav"), Path("out.m4a"), AudioFormat.AAC)
-    assert cmd[:4] == ["afconvert", "-f", "m4af", "-d"]
+    cmd = build_convert_command(
+        Path("in.wav"),
+        Path("out.m4a"),
+        AudioFormat.AAC,
+    )
+    assert cmd[:4] == [
+        "afconvert",
+        "-f",
+        "m4af",
+        "-d",
+    ]
     assert "aac" in cmd
 
 
 def test_build_convert_command_flac() -> None:
-    cmd = build_convert_command(Path("in.wav"), Path("out.flac"), AudioFormat.FLAC)
+    cmd = build_convert_command(
+        Path("in.wav"),
+        Path("out.flac"),
+        AudioFormat.FLAC,
+    )
     assert cmd[0] == "flac"
     assert "in.wav" in cmd
     assert "out.flac" in cmd
@@ -94,20 +146,104 @@ def test_build_convert_command_flac() -> None:
 
 def test_build_convert_command_wav_raises() -> None:
     with pytest.raises(ValueError):
-        build_convert_command(Path("in.wav"), Path("out.wav"), AudioFormat.WAV)
+        build_convert_command(
+            Path("in.wav"),
+            Path("out.wav"),
+            AudioFormat.WAV,
+        )
 
 
-# --- 必要な外部コマンドのチェック -----------------------------------------
+# --- PATH / 外部コマンドのチェック --------------------------------------
 
 
-def test_missing_tools_reports_absent_binaries(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("mkhybrid_gui.audio_cd.shutil.which", lambda name: None)
-    assert missing_tools(AudioFormat.FLAC) == ["cdparanoia", "flac"]
+def test_missing_tools_uses_effective_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """missing_tools() がPATHを指定してwhich()を呼び出すことを確認する。"""
+    calls: list[tuple[str, str | None]] = []
+
+    def fake_which(
+        name: str,
+        path: str | None = None,
+    ) -> str | None:
+        calls.append((name, path))
+        return f"/opt/homebrew/bin/{name}"
+
+    monkeypatch.setattr(
+        audio_cd.shutil,
+        "which",
+        fake_which,
+    )
+    monkeypatch.setattr(
+        audio_cd,
+        "_effective_path",
+        lambda: "/opt/homebrew/bin:/usr/bin:/bin",
+    )
+
+    assert missing_tools(AudioFormat.FLAC) == []
+
+    assert calls == [
+        ("cd-paranoia", "/opt/homebrew/bin:/usr/bin:/bin"),
+        ("flac", "/opt/homebrew/bin:/usr/bin:/bin"),
+    ]
 
 
-def test_missing_tools_empty_when_all_present(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("mkhybrid_gui.audio_cd.shutil.which", lambda name: f"/usr/bin/{name}")
+def test_missing_tools_reports_absent_binaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        audio_cd.shutil,
+        "which",
+        lambda name, path=None: None,
+    )
+    monkeypatch.setattr(
+        audio_cd,
+        "_effective_path",
+        lambda: "/usr/bin:/bin",
+    )
+
+    assert missing_tools(AudioFormat.FLAC) == [
+        "cd-paranoia",
+        "flac",
+    ]
+
+
+def test_missing_tools_empty_when_all_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        audio_cd.shutil,
+        "which",
+        lambda name, path=None: f"/usr/bin/{name}",
+    )
+    monkeypatch.setattr(
+        audio_cd,
+        "_effective_path",
+        lambda: "/usr/bin:/bin",
+    )
+
     assert missing_tools(AudioFormat.ALAC) == []
+
+
+def test_command_environment_uses_effective_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        audio_cd,
+        "_effective_path",
+        lambda: "/opt/homebrew/bin:/usr/bin:/bin",
+    )
+    monkeypatch.setenv(
+        "PATH",
+        "/usr/bin:/bin",
+    )
+
+    env = audio_cd._command_env()
+
+    assert env["PATH"] == "/opt/homebrew/bin:/usr/bin:/bin"
+
+
+# --- 出力拡張子 ---------------------------------------------------------
 
 
 def test_output_extension_matches_container() -> None:
@@ -122,14 +258,25 @@ def test_output_extension_matches_container() -> None:
 
 
 class _FakeRipPopen:
-    """``cdparanoia`` の代わりに、あらかじめ用意したバイト列を出力先へ書き込む。"""
+    """``cd-paranoia`` の代わりに、
+    あらかじめ用意したバイト列を出力先へ書き込む。
+    """
 
     _content_queue: list[bytes] = []
+    commands: list[list[str]] = []
+    environments: list[dict[str, str] | None] = []
 
     def __init__(self, cmd, **kwargs):
         self.cmd = cmd
+        self.commands.append(cmd)
+        self.environments.append(kwargs.get("env"))
+
         output_path = Path(cmd[-1])
-        content = self._content_queue.pop(0) if self._content_queue else b"default"
+        content = (
+            self._content_queue.pop(0)
+            if self._content_queue
+            else b"default"
+        )
         output_path.write_bytes(content)
         self.stdout = iter([])
 
@@ -138,26 +285,70 @@ class _FakeRipPopen:
 
 
 def test_rip_track_verified_accepts_matching_second_read(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _FakeRipPopen._content_queue = [b"AAA", b"AAA"]
-    monkeypatch.setattr(subprocess, "Popen", _FakeRipPopen)
+    _FakeRipPopen.commands = []
+    _FakeRipPopen.environments = []
 
-    result = rip_track_verified(1, tmp_path, verify=True, max_attempts=3)
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        _FakeRipPopen,
+    )
+    monkeypatch.setattr(
+        audio_cd,
+        "_effective_path",
+        lambda: "/opt/homebrew/bin:/usr/bin:/bin",
+    )
+
+    result = rip_track_verified(
+        1,
+        tmp_path,
+        verify=True,
+        max_attempts=3,
+    )
 
     assert isinstance(result, RipTrackResult)
     assert result.verified is True
     assert result.attempts == 2
     assert result.wav_path.read_bytes() == b"AAA"
 
+    assert _FakeRipPopen.commands[0] == [
+        "cd-paranoia",
+        "1",
+        str(tmp_path / "track01.attempt1.wav"),
+    ]
+    assert _FakeRipPopen.environments[0]["PATH"] == (
+        "/opt/homebrew/bin:/usr/bin:/bin"
+    )
+
 
 def test_rip_track_verified_falls_back_to_unverified_after_max_attempts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _FakeRipPopen._content_queue = [b"AAA", b"BBB", b"CCC"]
-    monkeypatch.setattr(subprocess, "Popen", _FakeRipPopen)
+    _FakeRipPopen._content_queue = [
+        b"AAA",
+        b"BBB",
+        b"CCC",
+    ]
+    _FakeRipPopen.commands = []
+    _FakeRipPopen.environments = []
 
-    result = rip_track_verified(1, tmp_path, verify=True, max_attempts=3)
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        _FakeRipPopen,
+    )
+
+    result = rip_track_verified(
+        1,
+        tmp_path,
+        verify=True,
+        max_attempts=3,
+    )
 
     assert result.verified is False
     assert result.attempts == 3
@@ -165,12 +356,24 @@ def test_rip_track_verified_falls_back_to_unverified_after_max_attempts(
 
 
 def test_rip_track_verified_single_attempt_when_verify_disabled(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _FakeRipPopen._content_queue = [b"AAA"]
-    monkeypatch.setattr(subprocess, "Popen", _FakeRipPopen)
+    _FakeRipPopen.commands = []
+    _FakeRipPopen.environments = []
 
-    result = rip_track_verified(1, tmp_path, verify=False)
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        _FakeRipPopen,
+    )
+
+    result = rip_track_verified(
+        1,
+        tmp_path,
+        verify=False,
+    )
 
     assert result.verified is False
     assert result.attempts == 1
@@ -185,48 +388,80 @@ class _FailingPopen:
 
 
 def test_rip_track_verified_raises_when_every_attempt_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(subprocess, "Popen", _FailingPopen)
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        _FailingPopen,
+    )
 
     with pytest.raises(AudioCdError):
-        rip_track_verified(1, tmp_path, verify=True, max_attempts=2)
+        rip_track_verified(
+            1,
+            tmp_path,
+            verify=True,
+            max_attempts=2,
+        )
 
 
 # --- フォーマット変換の実行 -----------------------------------------------
 
 
 def test_convert_audio_wav_copies_without_external_command(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fail_if_called(*args, **kwargs):
-        raise AssertionError("WAV変換で外部コマンドを呼び出すべきではない")
+        raise AssertionError(
+            "WAV変換で外部コマンドを呼び出すべきではない"
+        )
 
-    monkeypatch.setattr(subprocess, "Popen", fail_if_called)
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        fail_if_called,
+    )
 
     source = tmp_path / "in.wav"
     source.write_bytes(b"pcm-data")
+
     target = tmp_path / "out.wav"
 
-    convert_audio(source, target, AudioFormat.WAV)
+    convert_audio(
+        source,
+        target,
+        AudioFormat.WAV,
+    )
 
     assert target.read_bytes() == b"pcm-data"
 
 
 def test_convert_audio_raises_on_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(subprocess, "Popen", _FailingPopen)
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        _FailingPopen,
+    )
 
     with pytest.raises(AudioCdError):
-        convert_audio(tmp_path / "in.wav", tmp_path / "out.m4a", AudioFormat.ALAC)
+        convert_audio(
+            tmp_path / "in.wav",
+            tmp_path / "out.m4a",
+            AudioFormat.ALAC,
+        )
 
 
 # --- ディスク全体のリッピング -------------------------------------------
 
 
 def test_rip_and_convert_disc_end_to_end(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fake_run(cmd, **kwargs):
         class FakeCompletedProcess:
@@ -245,19 +480,38 @@ def test_rip_and_convert_disc_end_to_end(
         def wait(self) -> int:
             return 0
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
-    monkeypatch.setattr(subprocess, "Popen", _FakeEndToEndPopen)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        fake_run,
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "Popen",
+        _FakeEndToEndPopen,
+    )
+
+    monkeypatch.setattr(
+        audio_cd,
+        "_effective_path",
+        lambda: "/opt/homebrew/bin:/usr/bin:/bin",
+    )
 
     dest = tmp_path / "out"
     work = tmp_path / "work"
 
     result = rip_and_convert_disc(
-        "/dev/rdisk4", dest, AudioFormat.WAV, work, verify=True
+        "/dev/rdisk4",
+        dest,
+        AudioFormat.WAV,
+        work,
+        verify=True,
     )
 
     assert result.ok is True
     assert len(result.tracks) == 3
-    assert all(t.verified for t in result.tracks)
+    assert all(track.verified for track in result.tracks)
+
     assert (dest / "Track01.wav").exists()
     assert (dest / "Track02.wav").exists()
     assert (dest / "Track03.wav").exists()
