@@ -889,17 +889,20 @@ class MainWindow(QMainWindow):
 
         dest_path = Path(dest_text)
         album_metadata = self._collect_album_metadata()
+        fallback_folder_name = volume.volume_name or volume.device_identifier
 
-        # アルバム名が入力されている場合、実際の書き出し先は
-        # dest_path直下ではなくその中のアルバム名サブディレクトリになる
+        # 実際の書き出し先は、dest_path直下ではなく、アルバム名
+        # （未入力ならディスクのボリューム名）のサブディレクトリになる
         # （audio_cd.rip_and_convert_discと同じロジック）。上書き確認は
         # 実際に書き込まれる場所に対して行う。
-        actual_output_dir = dest_path
-
         if album_metadata is not None and album_metadata.album:
-            actual_output_dir = dest_path / sanitize_filename_component(
-                album_metadata.album
-            )
+            folder_name = album_metadata.album
+        else:
+            folder_name = fallback_folder_name
+
+        actual_output_dir = dest_path / sanitize_filename_component(
+            folder_name
+        )
 
         if actual_output_dir.exists() and any(
             actual_output_dir.iterdir()
@@ -937,6 +940,7 @@ class MainWindow(QMainWindow):
             self._audio_work_tmpdir.name,
             verify=self.verify_checkbox.isChecked(),
             album_metadata=album_metadata,
+            fallback_folder_name=fallback_folder_name,
             parent=self,
         )
 

@@ -1103,3 +1103,108 @@ def test_rip_and_convert_disc_without_album_name_uses_destination_dir_directly(
     assert result.ok is True
     assert result.output_directory == dest
     assert (dest / "01 - Opening.wav").exists()
+
+
+def test_rip_and_convert_disc_uses_fallback_folder_name_without_album(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """アルバム名未入力でも、fallback_folder_name（ディスクのボリューム名等）
+    が指定されていれば、そのサブディレクトリに書き出す。
+    """
+
+    def fake_run(cmd, **kwargs):
+        class FakeCompletedProcess:
+            returncode = 0
+            stdout = SAMPLE_QUERY_OUTPUT
+            stderr = ""
+
+        return FakeCompletedProcess()
+
+    class _FakeWavPopen:
+        def __init__(self, cmd, **kwargs):
+            output_path = Path(cmd[-1])
+            _build_minimal_wav(output_path)
+            self.stdout = iter([])
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", _FakeWavPopen)
+    monkeypatch.setattr(
+        audio_cd,
+        "_effective_path",
+        lambda: "/opt/homebrew/bin:/usr/bin:/bin",
+    )
+
+    dest = tmp_path / "out"
+    work = tmp_path / "work"
+
+    result = rip_and_convert_disc(
+        "/dev/rdisk4",
+        dest,
+        AudioFormat.WAV,
+        work,
+        verify=True,
+        fallback_folder_name="Audio CD",
+    )
+
+    assert result.ok is True
+    fallback_dir = dest / "Audio CD"
+    assert result.output_directory == fallback_dir
+    assert (fallback_dir / "Track01.wav").exists()
+
+
+def test_rip_and_convert_disc_album_name_takes_priority_over_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """アルバム名とfallback_folder_nameの両方が指定されている場合は
+    アルバム名を優先する。
+    """
+
+    def fake_run(cmd, **kwargs):
+        class FakeCompletedProcess:
+            returncode = 0
+            stdout = SAMPLE_QUERY_OUTPUT
+            stderr = ""
+
+        return FakeCompletedProcess()
+
+    class _FakeWavPopen:
+        def __init__(self, cmd, **kwargs):
+            output_path = Path(cmd[-1])
+            _build_minimal_wav(output_path)
+            self.stdout = iter([])
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", _FakeWavPopen)
+    monkeypatch.setattr(
+        audio_cd,
+        "_effective_path",
+        lambda: "/opt/homebrew/bin:/usr/bin:/bin",
+    )
+
+    dest = tmp_path / "out"
+    work = tmp_path / "work"
+
+    album = AlbumMetadata(album="Test Album", artist="", tracks=[TrackMetadata()] * 3)
+
+    result = rip_and_convert_disc(
+        "/dev/rdisk4",
+        dest,
+        AudioFormat.WAV,
+        work,
+        verify=True,
+        album_metadata=album,
+        fallback_folder_name="Audio CD",
+    )
+
+    assert result.ok is True
+    album_dir = dest / "Test Album"
+    assert result.output_directory == album_dir
+    assert (album_dir / "Track01.wav").exists()

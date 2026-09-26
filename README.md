@@ -32,6 +32,11 @@ macOS標準のCDDAFSマウント（Finderが見せる再生可能なAIFFファ�
 （[mutagen](https://mutagen.readthedocs.io/) を使用。MP4/ALAC/AACはiTunes系
 タグ、FLACはVorbis Comment、WAV/AIFFはID3v2タグとして埋め込まれます）。
 
+出力先フォルダの直下には、複数回のリッピング結果が無秩序に混在しないよう、
+必ずサブフォルダを作ってその中にトラックファイルを書き出します。サブフォルダ名は
+アルバム名を入力していればそれを使い、未入力の場合はディスクのボリューム名
+（例:「Audio CD」）を使います。
+
 「オンラインで検索（MusicBrainz）」ボタンを押すと、ディスクのTOC（トラック数・
 各トラックの長さ）から計算した
 [MusicBrainz Disc ID](https://musicbrainz.org/doc/Disc_ID_Calculation) を使って

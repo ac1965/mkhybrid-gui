@@ -754,6 +754,7 @@ def rip_and_convert_disc(
     on_process_started: ProcessStartedCallback | None = None,
     cancel_check: CancelCheck | None = None,
     album_metadata: AlbumMetadata | None = None,
+    fallback_folder_name: str | None = None,
 ) -> RipResult:
     """音楽CDの全トラックをリッピングし、指定フォーマットで
     ``destination_dir`` に書き出す。
@@ -768,15 +769,23 @@ def rip_and_convert_disc(
     ``album_metadata`` が ``None``、またはタイトル未入力の場合は従来通り
     ``TrackNN.ext`` のままタグ付けは行わない。
 
-    アルバム名が入力されている場合、``destination_dir`` 直下ではなく、
-    アルバム名（ファイル名として安全な文字列に変換したもの）を名前とする
-    サブディレクトリの中にトラックファイルを書き出す。アルバム名が
-    未入力の場合は従来通り ``destination_dir`` 直下に書き出す。
+    ``destination_dir`` 直下に複数回のリッピング結果が無秩序に混在しない
+    よう、必ず何らかのサブディレクトリの中にトラックファイルを書き出す。
+    サブディレクトリ名は、アルバム名が入力されていればそれを使い
+    （ファイル名として安全な文字列に変換）、未入力の場合は
+    ``fallback_folder_name``（通常はディスクのボリューム名、例:
+    「Audio CD」）を使う。``fallback_folder_name`` も指定されない場合に
+    限り、従来通り ``destination_dir`` 直下に書き出す。
     """
     dest = Path(destination_dir)
 
     if album_metadata is not None and album_metadata.album:
-        dest = dest / sanitize_filename_component(album_metadata.album)
+        folder_name: str | None = album_metadata.album
+    else:
+        folder_name = fallback_folder_name
+
+    if folder_name:
+        dest = dest / sanitize_filename_component(folder_name)
 
     dest.mkdir(parents=True, exist_ok=True)
 
@@ -908,6 +917,7 @@ if QThread is not None:
             work_dir: str | Path,
             verify: bool = True,
             album_metadata: AlbumMetadata | None = None,
+            fallback_folder_name: str | None = None,
             parent=None,
         ) -> None:
             super().__init__(parent)
@@ -917,6 +927,7 @@ if QThread is not None:
             self._work_dir = work_dir
             self._verify = verify
             self._album_metadata = album_metadata
+            self._fallback_folder_name = fallback_folder_name
             self._process: subprocess.Popen[str] | None = None
             self._cancel_requested = False
 
@@ -953,6 +964,7 @@ if QThread is not None:
                     on_process_started=self._capture_process,
                     cancel_check=self._is_cancelled,
                     album_metadata=self._album_metadata,
+                    fallback_folder_name=self._fallback_folder_name,
                 )
             except AudioCdError as exc:
                 self.finished_ok.emit(False, str(exc))
