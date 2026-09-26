@@ -50,14 +50,14 @@
 ├── src/
 │   └── mkhybrid_gui/
 │       ├── app.py              # エントリポイント / GUI起動
-│       ├── config.py           # 設定値の集約・config.tomlの読み込み（AppConfig）
+│       ├── config.py           # 設定値の集約・config.tomlの読み書き（AppConfig/UiPreferences）
 │       ├── disk_utils.py       # diskutil list/info のパース、メディア種別（MediaType）判定
 │       ├── iso_builder.py      # hdiutil makehybrid / 検証(attach+verifyVolume) のラッパー、IsoWorker(QThread)
 │       ├── audio_cd.py         # cd-paranoiaによる正確なリッピング、afconvert/flacでの形式変換、TOC解析、mutagenタグ付け、AudioRipWorker(QThread)
 │       ├── metadata.py         # AlbumMetadata/TrackMetadata、MusicBrainz Disc ID計算（純ロジック）
 │       ├── musicbrainz.py      # MusicBrainz Web Serviceへの問い合わせ（urllib標準ライブラリのみ）、MetadataLookupWorker(QThread)
 │       └── ui/
-│           └── main_window.py  # PySide6ウィジェット定義（メディア種別に応じてUIを切替、音楽CDメタデータ入力欄）
+│           └── main_window.py  # PySide6ウィジェット定義（「作成」タブ+「設定」タブのQTabWidget構成、メディア種別に応じてUIを切替、音楽CDメタデータ入力欄）
 ├── tests/
 │   ├── conftest.py          # 全テスト共通フィクスチャ（実環境の設定ファイルからの隔離等）
 │   ├── test_config.py
@@ -142,6 +142,11 @@ make distclean  # clean に加えて .venv も削除
    - **タグ**: `mutagen` を使い、形式ごとに適切なタグへ書き込む（`audio_cd.write_metadata_tags`）。MP4(ALAC/AAC)はiTunes系アトム、FLACはVorbis Comment、WAV/AIFFはID3v2。全項目未入力（アルバム名・アーティスト名・全トラックタイトルが空）ならタグ付けをスキップする。
    - **オンライン検索**: 「オンラインで検索（MusicBrainz）」ボタン（GUI上の明示的なクリックでのみ動作、自動実行しない）で、ディスクのTOCから計算した [MusicBrainz Disc ID](https://musicbrainz.org/doc/Disc_ID_Calculation)（`audio_cd.query_disc_toc` + `audio_cd.disc_id_from_disc_toc`）を使い `musicbrainz.lookup_releases` でMusicBrainzに問い合わせる。0件・複数件・ネットワークエラーのいずれも例外を投げず `LookupResult` として返し、リッピング処理自体を止めないこと。複数候補時はユーザーに選ばせ、既に入力がある場合は上書き前に確認する。
    - MusicBrainz API利用時は、意味のある `User-Agent` を送信し、1秒1リクエストのレート制限を守ること（`musicbrainz._wait_for_rate_limit`）。
+9. **設定のTOML反映・保存**: [config.py](src/mkhybrid_gui/config.py) はアプリ内部のチューニング値（`MediaSizeThresholds`/`AudioRipSettings`）に加え、GUI上のオプション選択を次回起動時にも復元するための `UiPreferences`（出力先フォルダ・Joliet/Rock Ridge/UDF・書き出し形式・検証有無）を保持する。
+   - `config.get_config()` は既定パス（環境変数 `XDG_CACHE_HOME`（未設定時は `~/.cache`）配下の `mkhybrid/config.toml`。環境変数 `MKHYBRID_GUI_CONFIG` でパス自体を上書き可）から読み込み、`config.save_config()` は同じパスへTOMLとして書き戻す（`config.to_toml_string()` が手書きのシリアライザ。標準ライブラリの `tomllib` は読み込み専用のため）。設定はXDG的には本来 `XDG_CONFIG_HOME` に置くのがより適切だが、本プロジェクトの要件により `XDG_CACHE_HOME` 配下を使用する（`config.default_config_path()`）。
+   - GUIはメイン画面（`MainWindow`）を `QTabWidget` で「ISO作成 / 音楽CD」タブと「設定」タブの2タブに分割する（`_build_main_tab`/`_build_settings_tab`）。「設定」タブでは `MediaSizeThresholds`/`AudioRipSettings`（サイズ閾値はMB単位のスピンボックスで表示、内部はバイトへ換算）を編集でき、「設定を保存」ボタン（`_on_settings_save_clicked`）で即座にTOMLへ反映・保存できる。設定ファイルの実際の場所も同タブに表示する（`config.get_config_path()`）。
+   - `MainWindow.__init__()` はウィジェット構築直後に `config.get_config()` を読み込んで両タブの各ウィジェット（Joliet/Rock Ridge/UDFチェックボックス、検証チェックボックス、書き出し形式ラジオボタン、出力先ダイアログの初期フォルダ、設定タブのスピンボックス群）へ反映し（`_apply_config`）、`closeEvent()`（ワーカー実行中でない場合のみ）で両タブの現在の状態をまとめて保存する（`_save_current_settings`、内部で `_collect_current_config` を使用）。設定ファイルへの書き込みに失敗しても（権限不足等）アプリの終了自体は妨げない。
+   - `audio_format` は表示ラベルではなく `AudioFormat` のメンバー名（例: `"ALAC"`）で保存する。読み込み時に未知の値であれば `AudioFormat.ALAC` にフォールバックする。
 
 ## テスト
 

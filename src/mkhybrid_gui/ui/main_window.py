@@ -23,12 +23,15 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QRadioButton,
+    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from mkhybrid_gui import config
 from mkhybrid_gui.audio_cd import (
     AudioCdError,
     AudioFormat,
@@ -80,8 +83,10 @@ class MainWindow(QMainWindow):
         self._audio_work_tmpdir: tempfile.TemporaryDirectory[str] | None = None
         self._disc_toc: DiscToc | None = None
         self._metadata_lookup_worker: MetadataLookupWorker | None = None
+        self._last_output_directory = ""
 
         self._build_ui()
+        self._apply_config(config.get_config())
         self._refresh_volumes()
 
         # マウント済みのドライブが1つも無い場合、_refresh_volumes()が
@@ -94,8 +99,14 @@ class MainWindow(QMainWindow):
     # -- UI構築 -----------------------------------------------------
 
     def _build_ui(self) -> None:
-        central = QWidget(self)
-        self.setCentralWidget(central)
+        self.tab_widget = QTabWidget(self)
+        self.setCentralWidget(self.tab_widget)
+
+        self.tab_widget.addTab(self._build_main_tab(), "ISO作成 / 音楽CD")
+        self.tab_widget.addTab(self._build_settings_tab(), "設定")
+
+    def _build_main_tab(self) -> QWidget:
+        central = QWidget()
         root_layout = QVBoxLayout(central)
 
         form = QFormLayout()
@@ -228,6 +239,66 @@ class MainWindow(QMainWindow):
         self.log_view.setReadOnly(True)
         root_layout.addWidget(self.log_view, stretch=1)
 
+        return central
+
+    def _build_settings_tab(self) -> QWidget:
+        """「設定」タブ: ``config.toml`` のチューニング値をGUIから編集する。
+
+        ここで編集した値は「設定を保存」ボタン、またはウィンドウを閉じた
+        タイミングで ``config.save_config()`` によりTOMLへ反映・保存される
+        （``_collect_current_config`` / ``_save_current_settings``）。
+        """
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        self.cd_max_size_spin = QSpinBox()
+        self.cd_max_size_spin.setRange(1, 999_999)
+        self.cd_max_size_spin.setSuffix(" MB")
+        form.addRow(
+            "データCDとして扱う最大サイズ:", self.cd_max_size_spin
+        )
+
+        self.dvd_max_size_spin = QSpinBox()
+        self.dvd_max_size_spin.setRange(1, 999_999)
+        self.dvd_max_size_spin.setSuffix(" MB")
+        form.addRow(
+            "DVDとして扱う最大サイズ（超過時はBlu-ray扱い）:",
+            self.dvd_max_size_spin,
+        )
+
+        self.audio_verify_attempts_spin = QSpinBox()
+        self.audio_verify_attempts_spin.setRange(1, 10)
+        self.audio_verify_attempts_spin.setSuffix(" 回")
+        form.addRow(
+            "音楽CD検証の最大試行回数:", self.audio_verify_attempts_spin
+        )
+
+        self.settings_path_label = QLabel(str(config.get_config_path()))
+        self.settings_path_label.setWordWrap(True)
+        self.settings_path_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        form.addRow("設定ファイルの場所:", self.settings_path_label)
+
+        save_row = QHBoxLayout()
+        self.settings_save_button = QPushButton("設定を保存")
+        self.settings_save_button.clicked.connect(
+            self._on_settings_save_clicked
+        )
+        save_row.addWidget(self.settings_save_button)
+        save_row.addStretch(1)
+        layout.addLayout(save_row)
+
+        self.settings_status_label = QLabel("")
+        layout.addWidget(self.settings_status_label)
+
+        layout.addStretch(1)
+
+        return tab
+
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qtのオーバーライド
         """処理中のワーカースレッドを残したままウィンドウが閉じられるのを防ぐ。
 
@@ -244,7 +315,98 @@ class MainWindow(QMainWindow):
             event.ignore()
             return
 
+        self._save_current_settings()
         super().closeEvent(event)
+
+    # -- 設定（GUIオプションのTOML反映/保存） -----------------------------
+
+    #: サイズ閾値スピンボックス（MB単位表示）とバイト単位の内部値との
+    #: 換算係数。``MediaSizeThresholds`` の既定値（10億/100億バイト）が
+    #: ちょうど1000/10000 MBになる10進基準を採用する（``QSpinBox`` は
+    #: 32bit intのため、バイト単位のまま扱うとDVD既定値付近で桁があふれる）。
+    _BYTES_PER_MB = 1_000_000
+
+    def _apply_config(self, app_config: config.AppConfig) -> None:
+        """読み込んだ ``AppConfig`` を「作成」タブ・「設定」タブ両方へ反映する。
+
+        設定ファイルが存在しない場合は既定値の ``AppConfig`` が渡され、
+        ``_build_ui()`` 構築時の既定状態と同じ値になるため、実質的に
+        何も変化しない。
+        """
+        self._last_output_directory = app_config.ui.last_output_directory
+        self.joliet_checkbox.setChecked(app_config.ui.joliet)
+        self.rock_checkbox.setChecked(app_config.ui.rock)
+        self.udf_checkbox.setChecked(app_config.ui.udf)
+        self.verify_checkbox.setChecked(app_config.ui.verify)
+
+        try:
+            audio_format = AudioFormat[app_config.ui.audio_format]
+        except KeyError:
+            audio_format = AudioFormat.ALAC
+
+        self._audio_format_buttons[audio_format].setChecked(True)
+
+        self.cd_max_size_spin.setValue(
+            max(1, app_config.media_size.cd_max_bytes // self._BYTES_PER_MB)
+        )
+        self.dvd_max_size_spin.setValue(
+            max(1, app_config.media_size.dvd_max_bytes // self._BYTES_PER_MB)
+        )
+        self.audio_verify_attempts_spin.setValue(
+            app_config.audio_rip.max_attempts
+        )
+
+    def _collect_current_config(self) -> config.AppConfig:
+        """「作成」タブ・「設定」タブ両方の現在の状態から ``AppConfig`` を組み立てる。"""
+        media_size = config.MediaSizeThresholds(
+            cd_max_bytes=self.cd_max_size_spin.value() * self._BYTES_PER_MB,
+            dvd_max_bytes=self.dvd_max_size_spin.value() * self._BYTES_PER_MB,
+        )
+        audio_rip = config.AudioRipSettings(
+            max_attempts=self.audio_verify_attempts_spin.value()
+        )
+        ui = config.UiPreferences(
+            last_output_directory=self._last_output_directory,
+            joliet=self.joliet_checkbox.isChecked(),
+            rock=self.rock_checkbox.isChecked(),
+            udf=self.udf_checkbox.isChecked(),
+            verify=self.verify_checkbox.isChecked(),
+            audio_format=self._selected_audio_format().name,
+        )
+
+        return config.AppConfig(
+            media_size=media_size, audio_rip=audio_rip, ui=ui
+        )
+
+    def _save_current_settings(self) -> bool:
+        """現在の「作成」タブ・「設定」タブの内容を ``config.toml`` へ保存する。
+
+        保存に失敗しても（設定ディレクトリへの書き込み権限が無い場合等）
+        呼び出し元の処理（ウィンドウを閉じる、等）は妨げない。
+        """
+        try:
+            config.save_config(self._collect_current_config())
+        except OSError:
+            return False
+
+        return True
+
+    def _on_settings_save_clicked(self) -> None:
+        """「設定」タブの「設定を保存」ボタン。
+
+        「作成」タブの現在のオプション（Joliet/UDF等）も合わせて保存する
+        （``closeEvent`` での自動保存と同じ ``_save_current_settings`` を
+        使うため）。
+        """
+        if self._save_current_settings():
+            self.settings_status_label.setText(
+                f"設定を保存しました（{config.get_config_path()}）。"
+            )
+        else:
+            self.settings_status_label.setText(
+                "設定を保存できませんでした"
+                "（保存先への書き込み権限を確認してください）。"
+            )
 
     # -- ドライブ一覧 -------------------------------------------------
 
@@ -367,12 +529,13 @@ class MainWindow(QMainWindow):
             path = QFileDialog.getExistingDirectory(
                 self,
                 "出力先フォルダを選択",
+                self._last_output_directory,
             )
         else:
             path, _ = QFileDialog.getSaveFileName(
                 self,
                 "出力先ISOファイルを選択",
-                "",
+                self._last_output_directory,
                 "ISOイメージ (*.iso)",
             )
 
@@ -381,6 +544,12 @@ class MainWindow(QMainWindow):
 
         if path:
             self.output_edit.setText(path)
+            # 次回のファイルダイアログの初期表示位置、および設定保存用に
+            # 「フォルダ」を記録する（ISO作成時はファイルの親ディレクトリ、
+            # 音楽CDリッピング時は選択したフォルダそのもの）。
+            self._last_output_directory = (
+                path if is_audio else str(Path(path).parent)
+            )
 
     def _selected_audio_format(self) -> AudioFormat:
         for audio_format, radio in self._audio_format_buttons.items():

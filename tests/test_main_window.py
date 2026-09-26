@@ -18,7 +18,8 @@ from pathlib import Path
 import pytest
 from PySide6.QtWidgets import QMessageBox
 
-from mkhybrid_gui.audio_cd import AudioCdError, DiscToc
+from mkhybrid_gui import config
+from mkhybrid_gui.audio_cd import AudioCdError, AudioFormat, DiscToc
 from mkhybrid_gui.disk_utils import MediaType, Volume
 from mkhybrid_gui.metadata import AlbumMetadata
 from mkhybrid_gui.musicbrainz import LookupResult, ReleaseCandidate
@@ -537,3 +538,203 @@ def test_progress_indicator_starts_busy_then_becomes_determinate(
         100,
     )
     assert window.progress_bar.value() == 42
+
+
+# --- 設定（GUIオプションのTOML保存/復元） -------------------------------
+
+
+def test_construction_applies_saved_ui_preferences(
+    qtbot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """設定ファイルに保存済みの値が、起動時に各ウィジェットへ反映される。
+
+    ``conftest.py`` の ``_isolate_app_config``（autouse）が
+    ``MKHYBRID_GUI_CONFIG`` を一時ファイルへ向けているため、ここで
+    ``config.save_config`` した内容がそのまま次に構築する
+    ``MainWindow`` から読み込まれる。
+    """
+    monkeypatch.setattr(main_window_module, "list_volumes", lambda: [])
+
+    config.save_config(
+        config.AppConfig(
+            ui=config.UiPreferences(
+                last_output_directory="/Volumes/Backup",
+                joliet=False,
+                rock=False,
+                udf=True,
+                verify=False,
+                audio_format="FLAC",
+            )
+        )
+    )
+
+    w = MainWindow()
+    qtbot.addWidget(w)
+
+    assert w.joliet_checkbox.isChecked() is False
+    assert w.rock_checkbox.isChecked() is False
+    assert w.udf_checkbox.isChecked() is True
+    assert w.verify_checkbox.isChecked() is False
+    assert w._audio_format_buttons[AudioFormat.FLAC].isChecked() is True
+    assert w._last_output_directory == "/Volumes/Backup"
+
+
+def test_construction_falls_back_to_alac_for_unknown_saved_format(
+    qtbot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(main_window_module, "list_volumes", lambda: [])
+
+    config.save_config(
+        config.AppConfig(ui=config.UiPreferences(audio_format="MP3"))
+    )
+
+    w = MainWindow()
+    qtbot.addWidget(w)
+
+    assert w._audio_format_buttons[AudioFormat.ALAC].isChecked() is True
+
+
+def test_close_event_saves_current_ui_preferences(
+    window: MainWindow,
+) -> None:
+    from PySide6.QtGui import QCloseEvent
+
+    window.joliet_checkbox.setChecked(False)
+    window.rock_checkbox.setChecked(False)
+    window.udf_checkbox.setChecked(True)
+    window.verify_checkbox.setChecked(False)
+    window._audio_format_buttons[AudioFormat.FLAC].setChecked(True)
+    window._last_output_directory = "/tmp/my-output"
+
+    window.closeEvent(QCloseEvent())
+
+    saved = config.get_config().ui
+    assert saved.joliet is False
+    assert saved.rock is False
+    assert saved.udf is True
+    assert saved.verify is False
+    assert saved.audio_format == "FLAC"
+    assert saved.last_output_directory == "/tmp/my-output"
+
+
+def test_close_event_while_worker_running_does_not_save_preferences(
+    window: MainWindow, _no_modal_dialogs: list
+) -> None:
+    from PySide6.QtGui import QCloseEvent
+
+    window.joliet_checkbox.setChecked(False)
+    window._worker = _FakeWorker(running=True)
+
+    window.closeEvent(QCloseEvent())
+
+    # デフォルト値のまま（保存が実行されていない）ことを確認する。
+    assert config.get_config().ui.joliet is True
+
+
+def test_choose_output_path_updates_last_output_directory_for_iso(
+    qtbot,
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    window.show()
+    _select_volume(window, _dvd_volume())
+
+    chosen = tmp_path / "out.iso"
+    monkeypatch.setattr(
+        main_window_module.QFileDialog,
+        "getSaveFileName",
+        lambda *a, **k: (str(chosen), "ISOイメージ (*.iso)"),
+    )
+
+    window._choose_output_path()
+
+    assert window.output_edit.text() == str(chosen)
+    assert window._last_output_directory == str(tmp_path)
+
+
+def test_choose_output_path_updates_last_output_directory_for_audio(
+    qtbot,
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        main_window_module,
+        "query_disc_toc",
+        lambda device: DiscToc(track_offsets=[0], leadout_offset=1000),
+    )
+    window.show()
+    _select_volume(window, _audio_volume())
+
+    monkeypatch.setattr(
+        main_window_module.QFileDialog,
+        "getExistingDirectory",
+        lambda *a, **k: str(tmp_path),
+    )
+
+    window._choose_output_path()
+
+    assert window.output_edit.text() == str(tmp_path)
+    assert window._last_output_directory == str(tmp_path)
+
+
+# --- 設定タブ（サイズ閾値・検証リトライ回数） ------------------------------
+
+
+def test_settings_tab_shows_default_tuning_values(window: MainWindow) -> None:
+    assert window.cd_max_size_spin.value() == 1000
+    assert window.dvd_max_size_spin.value() == 10000
+    assert window.audio_verify_attempts_spin.value() == 3
+
+
+def test_construction_applies_saved_tuning_values(
+    qtbot, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(main_window_module, "list_volumes", lambda: [])
+
+    config.save_config(
+        config.AppConfig(
+            media_size=config.MediaSizeThresholds(
+                cd_max_bytes=500_000_000, dvd_max_bytes=8_000_000_000
+            ),
+            audio_rip=config.AudioRipSettings(max_attempts=5),
+        )
+    )
+
+    w = MainWindow()
+    qtbot.addWidget(w)
+
+    assert w.cd_max_size_spin.value() == 500
+    assert w.dvd_max_size_spin.value() == 8000
+    assert w.audio_verify_attempts_spin.value() == 5
+
+
+def test_settings_save_button_persists_tuning_and_ui_values(
+    window: MainWindow,
+) -> None:
+    window.cd_max_size_spin.setValue(123)
+    window.dvd_max_size_spin.setValue(4567)
+    window.audio_verify_attempts_spin.setValue(7)
+    window.udf_checkbox.setChecked(True)
+
+    window._on_settings_save_clicked()
+
+    saved = config.get_config()
+    assert saved.media_size.cd_max_bytes == 123_000_000
+    assert saved.media_size.dvd_max_bytes == 4_567_000_000
+    assert saved.audio_rip.max_attempts == 7
+    assert saved.ui.udf is True
+    assert "保存しました" in window.settings_status_label.text()
+
+
+def test_close_event_also_saves_settings_tab_values(
+    window: MainWindow,
+) -> None:
+    from PySide6.QtGui import QCloseEvent
+
+    window.cd_max_size_spin.setValue(42)
+
+    window.closeEvent(QCloseEvent())
+
+    assert config.get_config().media_size.cd_max_bytes == 42_000_000

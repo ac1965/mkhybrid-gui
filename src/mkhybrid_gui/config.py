@@ -1,10 +1,11 @@
-"""アプリケーション全体の設定値（サイズ閾値・リトライ回数等）。
+"""アプリケーション全体の設定値（サイズ閾値・リトライ回数・GUIの既定値等）。
 
 これまでコード内（``disk_utils.py``/``audio_cd.py``）に散らばっていた
 マジックナンバーをこのモジュールに集約する。既定値はこのモジュール内の
-データクラスに定義し、外部設定ファイル（TOML、既定は
-``~/.config/mkhybrid-gui/config.toml``。環境変数 ``MKHYBRID_GUI_CONFIG``
-でパスを上書き可能）が存在すればその値で上書きする。
+データクラスに定義し、外部設定ファイル（TOML、既定は環境変数
+``XDG_CACHE_HOME``（未設定時は ``~/.cache``）配下の
+``mkhybrid/config.toml``。環境変数 ``MKHYBRID_GUI_CONFIG`` でパス自体を
+上書き可能）が存在すればその値で上書きする。
 
 TOMLを採用しているのは、本プロジェクトが既にPython 3.11以降を要求して
 おり（``pyproject.toml``）、標準ライブラリの ``tomllib`` だけで読み込め、
@@ -14,6 +15,15 @@ TOMLを採用しているのは、本プロジェクトが既にPython 3.11以�
 
 設定ファイルが存在しない・壊れている・想定外の形式の場合は、既定値のみで
 動作する（設定ファイルの不備でアプリの起動を妨げない）。
+
+``get_config()`` による読み込みに加え、``save_config()`` でTOMLファイルへ
+書き戻すこともできる。これはGUI側（``ui/main_window.py``）が、前回終了時
+のオプション選択（Joliet/UDF等のチェックボックス、書き出し形式、検証の
+有無、出力先フォルダ）を ``UiPreferences`` として次回起動時に復元する
+ために使う。標準ライブラリの ``tomllib`` は読み込み専用のため、書き込みは
+本モジュールが手書きでシリアライズする（対象はすべてフラットな
+``bool``/``int``/``float``/``str`` のフィールドのみなので、TOML専用の
+外部ライブラリを新たに依存追加するほどの複雑さはない）。
 """
 
 from __future__ import annotations
@@ -49,22 +59,79 @@ class AudioRipSettings:
 
 
 @dataclass(frozen=True)
+class UiPreferences:
+    """GUIのオプション選択のうち、次回起動時にも復元したい既定値。
+
+    ``media_size``/``audio_rip`` が「実行のたびに変わることのない
+    チューニング値」であるのに対し、こちらは実行のたびにユーザーが
+    変更しうるGUIの状態（チェックボックス等）のスナップショットで
+    ある。``MainWindow`` がウィンドウを閉じる際に現在の状態を
+    ``save_config()`` で書き出し、次回起動時の ``get_config()`` で
+    読み込んで各ウィジェットへ反映する。
+
+    ``audio_format`` は表示用のラベル（例:
+    ``"Apple Lossless (ALAC)"``）ではなく、``AudioFormat`` の
+    メンバー名（例: ``"ALAC"``）で保存する。表示ラベルは将来的な
+    文言変更の影響を受けうるため、設定ファイルの安定した識別子には
+    向かない。
+    """
+
+    last_output_directory: str = ""
+    joliet: bool = True
+    rock: bool = True
+    udf: bool = False
+    verify: bool = True
+    audio_format: str = "ALAC"
+
+
+@dataclass(frozen=True)
 class AppConfig:
     """アプリケーション全体の設定。"""
 
     media_size: MediaSizeThresholds = MediaSizeThresholds()
     audio_rip: AudioRipSettings = AudioRipSettings()
+    ui: UiPreferences = UiPreferences()
 
-
-DEFAULT_CONFIG_PATH = Path.home() / ".config" / "mkhybrid-gui" / "config.toml"
 
 _CONFIG_PATH_ENV_VAR = "MKHYBRID_GUI_CONFIG"
+_XDG_CACHE_HOME_ENV_VAR = "XDG_CACHE_HOME"
+_CACHE_DIR_NAME = "mkhybrid"
+_CONFIG_FILE_NAME = "config.toml"
+
+
+def _xdg_cache_home() -> Path:
+    """``XDG_CACHE_HOME`` を返す（未設定時は ``~/.cache``。XDG Base
+    Directory 仕様の既定フォールバックに従う）。
+    """
+    override = os.environ.get(_XDG_CACHE_HOME_ENV_VAR)
+    return Path(override) if override else Path.home() / ".cache"
+
+
+def default_config_path() -> Path:
+    """既定の設定ファイルパスを返す（``MKHYBRID_GUI_CONFIG`` 環境変数に
+    よる上書きを考慮しない、素の既定値）。
+
+    ``XDG_CACHE_HOME``（未設定時は ``~/.cache``）配下の ``mkhybrid``
+    ディレクトリに ``config.toml`` を置く。
+    """
+    return _xdg_cache_home() / _CACHE_DIR_NAME / _CONFIG_FILE_NAME
 
 
 def _config_path() -> Path:
-    """設定ファイルのパスを返す（環境変数で上書き可能）。"""
+    """設定ファイルのパスを返す（``MKHYBRID_GUI_CONFIG`` 環境変数で
+    上書き可能。未設定時は ``default_config_path()``）。
+    """
     override = os.environ.get(_CONFIG_PATH_ENV_VAR)
-    return Path(override) if override else DEFAULT_CONFIG_PATH
+    return Path(override) if override else default_config_path()
+
+
+def get_config_path() -> Path:
+    """現在有効な設定ファイルのパスを返す。
+
+    GUI（``ui/main_window.py`` の設定タブ）が、設定ファイルの実際の
+    保存先をユーザーへ表示する際に使う公開API。
+    """
+    return _config_path()
 
 
 def _merge(default: Any, overrides: dict[str, Any] | None) -> Any:
@@ -122,6 +189,7 @@ def get_config() -> AppConfig:
 
     media_size_data = data.get("media_size")
     audio_rip_data = data.get("audio_rip")
+    ui_data = data.get("ui")
 
     media_size = _merge(
         MediaSizeThresholds(),
@@ -131,5 +199,82 @@ def get_config() -> AppConfig:
         AudioRipSettings(),
         audio_rip_data if isinstance(audio_rip_data, dict) else None,
     )
+    ui = _merge(
+        UiPreferences(),
+        ui_data if isinstance(ui_data, dict) else None,
+    )
 
-    return AppConfig(media_size=media_size, audio_rip=audio_rip)
+    return AppConfig(media_size=media_size, audio_rip=audio_rip, ui=ui)
+
+
+def _toml_format_value(value: Any) -> str:
+    """設定値1つをTOMLのリテラル表現（文字列）に変換する。
+
+    対象フィールドはすべて ``bool``/``int``/``float``/``str`` の
+    いずれかであるという前提（``AppConfig`` のデータクラス定義を参照）。
+    ``bool`` は ``int`` のサブクラスのため、``bool`` の判定を
+    ``int`` より先に行う必要がある。
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+
+    if isinstance(value, int):
+        return str(value)
+
+    if isinstance(value, float):
+        return repr(value)
+
+    if isinstance(value, str):
+        escaped = (
+            value.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\n", "\\n")
+            .replace("\t", "\\t")
+            .replace("\r", "\\r")
+        )
+        return f'"{escaped}"'
+
+    raise TypeError(f"TOMLへシリアライズできない型です: {type(value)!r}")
+
+
+def to_toml_string(app_config: AppConfig) -> str:
+    """``AppConfig`` をTOML文字列にシリアライズする（``save_config`` が使用）。
+
+    フィールドはすべてフラットな ``bool``/``int``/``float``/``str`` の
+    ため、外部ライブラリを追加せず手書きでシリアライズする（読み込みに
+    使う標準ライブラリの ``tomllib`` は書き込みに対応していないため）。
+    """
+    sections: list[str] = []
+
+    for section_field in fields(app_config):
+        section_value = getattr(app_config, section_field.name)
+        lines = [f"[{section_field.name}]"]
+
+        for value_field in fields(section_value):
+            value = getattr(section_value, value_field.name)
+            lines.append(f"{value_field.name} = {_toml_format_value(value)}")
+
+        sections.append("\n".join(lines))
+
+    return "\n\n".join(sections) + "\n"
+
+
+def save_config(app_config: AppConfig, path: Path | None = None) -> None:
+    """``app_config`` をTOMLファイルへ保存する。
+
+    保存先ディレクトリ（既定: ``$XDG_CACHE_HOME/mkhybrid/``）が存在しない
+    場合は作成する。書き込み中にプロセスが異常終了しても既存の設定
+    ファイルが壊れた状態で残らないよう、同じディレクトリ内の一時ファイル
+    へ書き出してから ``Path.replace`` でアトミックに置き換える。
+
+    保存後は ``get_config()`` の ``lru_cache`` をクリアし、次回の呼び出し
+    で保存内容が反映されるようにする。
+    """
+    target = path if path is not None else _config_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    tmp_path = target.with_name(target.name + ".tmp")
+    tmp_path.write_text(to_toml_string(app_config), encoding="utf-8")
+    tmp_path.replace(target)
+
+    get_config.cache_clear()
