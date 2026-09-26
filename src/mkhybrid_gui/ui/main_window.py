@@ -48,7 +48,11 @@ from mkhybrid_gui.disk_utils import (
     whole_disk_raw_device,
 )
 from mkhybrid_gui.iso_builder import IsoOptions, IsoWorker
-from mkhybrid_gui.metadata import AlbumMetadata, TrackMetadata
+from mkhybrid_gui.metadata import (
+    AlbumMetadata,
+    TrackMetadata,
+    sanitize_filename_component,
+)
 from mkhybrid_gui.musicbrainz import LookupResult, MetadataLookupWorker
 
 # ALACを先頭（既定・推奨）にした表示順
@@ -276,12 +280,20 @@ class MainWindow(QMainWindow):
             "音楽CD検証の最大試行回数:", self.audio_verify_attempts_spin
         )
 
+        # QFormLayoutの2カラム構造（キャプション列/値列）だと、値列の
+        # 実効幅がウィンドウ幅に対して狭くなりがちで、長いパス文字列が
+        # 折り返されずに途中で見切れてしまう（実機で報告された不具合）。
+        # そのため、このラベルだけはformの外に出し、タブの全幅を使う
+        # 独立した行として配置する。
+        settings_path_caption = QLabel("設定ファイルの場所:")
+        layout.addWidget(settings_path_caption)
+
         self.settings_path_label = QLabel(str(config.get_config_path()))
         self.settings_path_label.setWordWrap(True)
         self.settings_path_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
-        form.addRow("設定ファイルの場所:", self.settings_path_label)
+        layout.addWidget(self.settings_path_label)
 
         save_row = QHBoxLayout()
         self.settings_save_button = QPushButton("設定を保存")
@@ -809,12 +821,27 @@ class MainWindow(QMainWindow):
             return
 
         dest_path = Path(dest_text)
+        album_metadata = self._collect_album_metadata()
 
-        if dest_path.exists() and any(dest_path.iterdir()):
+        # アルバム名が入力されている場合、実際の書き出し先は
+        # dest_path直下ではなくその中のアルバム名サブディレクトリになる
+        # （audio_cd.rip_and_convert_discと同じロジック）。上書き確認は
+        # 実際に書き込まれる場所に対して行う。
+        actual_output_dir = dest_path
+
+        if album_metadata is not None and album_metadata.album:
+            actual_output_dir = dest_path / sanitize_filename_component(
+                album_metadata.album
+            )
+
+        if actual_output_dir.exists() and any(
+            actual_output_dir.iterdir()
+        ):
             reply = QMessageBox.question(
                 self,
                 "確認",
-                f"{dest_path} は空ではありません。同名ファイルは上書きされます。続行しますか？",
+                f"{actual_output_dir} は空ではありません。"
+                "同名ファイルは上書きされます。続行しますか？",
                 QMessageBox.StandardButton.Yes
                 | QMessageBox.StandardButton.No,
             )
@@ -841,7 +868,7 @@ class MainWindow(QMainWindow):
             audio_format,
             self._audio_work_tmpdir.name,
             verify=self.verify_checkbox.isChecked(),
-            album_metadata=self._collect_album_metadata(),
+            album_metadata=album_metadata,
             parent=self,
         )
 

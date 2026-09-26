@@ -723,6 +723,10 @@ class RipResult:
     tracks: list[TrackOutcome] = field(default_factory=list)
     failed_tracks: list[tuple[int, str]] = field(default_factory=list)
     cancelled: bool = False
+    #: トラックファイルを実際に書き出したディレクトリ。アルバム名が
+    #: 入力されていれば、指定した出力先フォルダ直下ではなく、その中の
+    #: アルバム名サブディレクトリになる。
+    output_directory: Path = field(default_factory=Path)
 
     @property
     def ok(self) -> bool:
@@ -763,8 +767,17 @@ def rip_and_convert_disc(
     タグ（アルバム名・アーティスト名・トラック名・年）を書き込む。
     ``album_metadata`` が ``None``、またはタイトル未入力の場合は従来通り
     ``TrackNN.ext`` のままタグ付けは行わない。
+
+    アルバム名が入力されている場合、``destination_dir`` 直下ではなく、
+    アルバム名（ファイル名として安全な文字列に変換したもの）を名前とする
+    サブディレクトリの中にトラックファイルを書き出す。アルバム名が
+    未入力の場合は従来通り ``destination_dir`` 直下に書き出す。
     """
     dest = Path(destination_dir)
+
+    if album_metadata is not None and album_metadata.album:
+        dest = dest / sanitize_filename_component(album_metadata.album)
+
     dest.mkdir(parents=True, exist_ok=True)
 
     work = Path(work_dir)
@@ -868,6 +881,7 @@ def rip_and_convert_disc(
         tracks=tracks,
         failed_tracks=failed,
         cancelled=cancelled,
+        output_directory=dest,
     )
 
 
@@ -962,7 +976,10 @@ if QThread is not None:
                 )
                 return
 
-            message = f"{len(result.tracks)}曲を書き出しました。"
+            message = (
+                f"{len(result.tracks)}曲を書き出しました。"
+                f"（保存先: {result.output_directory}）"
+            )
 
             if self._verify and result.unverified_tracks:
                 unverified = "、".join(

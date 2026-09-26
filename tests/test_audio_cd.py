@@ -1029,17 +1029,77 @@ def test_rip_and_convert_disc_with_metadata_names_files_and_writes_tags(
     assert result.ok is True
     assert len(result.tracks) == 3
 
-    assert (dest / "01 - Opening.wav").exists()
-    assert (dest / "Track02.wav").exists()  # タイトル未入力は従来通り
-    assert (dest / "03 - Finale.wav").exists()
+    # アルバム名が入力されている場合、destination_dir直下ではなく
+    # アルバム名サブディレクトリの中に書き出される。
+    album_dir = dest / "Test Album"
+    assert result.output_directory == album_dir
+
+    assert (album_dir / "01 - Opening.wav").exists()
+    assert (album_dir / "Track02.wav").exists()  # タイトル未入力は従来通り
+    assert (album_dir / "03 - Finale.wav").exists()
 
     import mutagen.wave
 
-    tagged = mutagen.wave.WAVE(str(dest / "01 - Opening.wav"))
+    tagged = mutagen.wave.WAVE(str(album_dir / "01 - Opening.wav"))
     assert str(tagged.tags.get("TALB")) == "Test Album"
     assert str(tagged.tags.get("TIT2")) == "Opening"
 
-    untagged = mutagen.wave.WAVE(str(dest / "Track02.wav"))
+    untagged = mutagen.wave.WAVE(str(album_dir / "Track02.wav"))
     # アルバム名・アーティスト名はトラックタイトル未入力でも書き込まれる。
     assert str(untagged.tags.get("TALB")) == "Test Album"
     assert untagged.tags.get("TIT2") is None
+
+
+def test_rip_and_convert_disc_without_album_name_uses_destination_dir_directly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """アルバム名が未入力の場合は、従来通りサブディレクトリを作らない。"""
+
+    def fake_run(cmd, **kwargs):
+        class FakeCompletedProcess:
+            returncode = 0
+            stdout = SAMPLE_QUERY_OUTPUT
+            stderr = ""
+
+        return FakeCompletedProcess()
+
+    class _FakeWavPopen:
+        def __init__(self, cmd, **kwargs):
+            output_path = Path(cmd[-1])
+            _build_minimal_wav(output_path)
+            self.stdout = iter([])
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", _FakeWavPopen)
+    monkeypatch.setattr(
+        audio_cd,
+        "_effective_path",
+        lambda: "/opt/homebrew/bin:/usr/bin:/bin",
+    )
+
+    dest = tmp_path / "out"
+    work = tmp_path / "work"
+
+    # アルバム名は空文字だが、トラックタイトルだけは入力されているケース。
+    album = AlbumMetadata(
+        album="",
+        artist="",
+        tracks=[TrackMetadata(title="Opening")] + [TrackMetadata()] * 2,
+    )
+
+    result = rip_and_convert_disc(
+        "/dev/rdisk4",
+        dest,
+        AudioFormat.WAV,
+        work,
+        verify=True,
+        album_metadata=album,
+    )
+
+    assert result.ok is True
+    assert result.output_directory == dest
+    assert (dest / "01 - Opening.wav").exists()
