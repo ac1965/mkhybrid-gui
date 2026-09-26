@@ -5,6 +5,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -13,6 +14,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -21,11 +23,21 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QRadioButton,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
 
-from mkhybrid_gui.audio_cd import AudioFormat, AudioRipWorker, missing_tools
+from mkhybrid_gui.audio_cd import (
+    AudioCdError,
+    AudioFormat,
+    AudioRipWorker,
+    DiscToc,
+    disc_id_from_disc_toc,
+    missing_tools,
+    query_disc_toc,
+)
 from mkhybrid_gui.disk_utils import (
     MediaType,
     Volume,
@@ -33,6 +45,8 @@ from mkhybrid_gui.disk_utils import (
     whole_disk_raw_device,
 )
 from mkhybrid_gui.iso_builder import IsoOptions, IsoWorker
+from mkhybrid_gui.metadata import AlbumMetadata, TrackMetadata
+from mkhybrid_gui.musicbrainz import LookupResult, MetadataLookupWorker
 
 # ALACを先頭（既定・推奨）にした表示順
 _AUDIO_FORMAT_ORDER = [
@@ -64,6 +78,8 @@ class MainWindow(QMainWindow):
         self._is_audio_job = False
         self._cancel_requested = False
         self._audio_work_tmpdir: tempfile.TemporaryDirectory[str] | None = None
+        self._disc_toc: DiscToc | None = None
+        self._metadata_lookup_worker: MetadataLookupWorker | None = None
 
         self._build_ui()
         self._refresh_volumes()
@@ -134,6 +150,49 @@ class MainWindow(QMainWindow):
         )
         self.verify_checkbox.setChecked(True)
         form.addRow(self.verify_checkbox)
+
+        metadata_fields_row = QHBoxLayout()
+        self.album_edit = QLineEdit()
+        self.album_edit.setPlaceholderText("アルバム名")
+        self.artist_edit = QLineEdit()
+        self.artist_edit.setPlaceholderText("アーティスト名")
+        self.year_edit = QLineEdit()
+        self.year_edit.setPlaceholderText("年")
+        self.year_edit.setMaximumWidth(80)
+        metadata_fields_row.addWidget(self.album_edit, stretch=2)
+        metadata_fields_row.addWidget(self.artist_edit, stretch=2)
+        metadata_fields_row.addWidget(self.year_edit, stretch=1)
+        self.metadata_fields_label = QLabel("メタデータ（任意）:")
+        form.addRow(self.metadata_fields_label, metadata_fields_row)
+
+        lookup_row = QHBoxLayout()
+        self.metadata_lookup_button = QPushButton(
+            "オンラインで検索（MusicBrainz）"
+        )
+        self.metadata_lookup_button.clicked.connect(
+            self._on_metadata_lookup_clicked
+        )
+        lookup_row.addWidget(self.metadata_lookup_button)
+        lookup_row.addStretch(1)
+        self.metadata_lookup_row_label = QLabel("")
+        form.addRow(self.metadata_lookup_row_label, lookup_row)
+
+        self.metadata_privacy_label = QLabel(
+            "※ディスクの識別情報（トラック数・長さのみ）をMusicBrainz.org"
+            "へ送信します。個人情報は含まれません。"
+        )
+        self.metadata_privacy_label.setWordWrap(True)
+        root_layout.addWidget(self.metadata_privacy_label)
+
+        self.metadata_status_label = QLabel("")
+        root_layout.addWidget(self.metadata_status_label)
+
+        self.track_title_table = QTableWidget(0, 2)
+        self.track_title_table.setHorizontalHeaderLabels(["#", "トラック名"])
+        self.track_title_table.horizontalHeader().setStretchLastSection(True)
+        self.track_title_table.verticalHeader().setVisible(False)
+        self.track_title_table.setMaximumHeight(160)
+        root_layout.addWidget(self.track_title_table)
 
         self.media_info_label = QLabel("")
         root_layout.addWidget(self.media_info_label)
@@ -239,6 +298,60 @@ class MainWindow(QMainWindow):
             else ""
         )
 
+        self.metadata_fields_label.setVisible(is_audio)
+        self.album_edit.setVisible(is_audio)
+        self.artist_edit.setVisible(is_audio)
+        self.year_edit.setVisible(is_audio)
+        self.metadata_lookup_row_label.setVisible(is_audio)
+        self.metadata_lookup_button.setVisible(is_audio)
+        self.metadata_privacy_label.setVisible(is_audio)
+        self.metadata_status_label.setVisible(is_audio)
+        self.track_title_table.setVisible(is_audio)
+
+        if is_audio and volume is not None:
+            self._prepare_audio_metadata_ui(volume)
+        else:
+            self._disc_toc = None
+            self.track_title_table.setRowCount(0)
+            self.album_edit.clear()
+            self.artist_edit.clear()
+            self.year_edit.clear()
+            self.metadata_status_label.setText("")
+
+    def _prepare_audio_metadata_ui(self, volume: Volume) -> None:
+        """音楽CD選択時に、TOCを取得してトラック名入力欄の行数を確定させる。"""
+        device = whole_disk_raw_device(volume.device_identifier)
+
+        self.track_title_table.setRowCount(0)
+        self.album_edit.clear()
+        self.artist_edit.clear()
+        self.year_edit.clear()
+        self.metadata_status_label.setText("トラック情報を取得しています…")
+
+        try:
+            toc = query_disc_toc(device)
+        except AudioCdError as exc:
+            self._disc_toc = None
+            self.metadata_status_label.setText(str(exc))
+            return
+
+        self._disc_toc = toc
+        track_count = len(toc.track_offsets)
+        self.track_title_table.setRowCount(track_count)
+
+        for row in range(track_count):
+            number_item = QTableWidgetItem(str(row + 1))
+            number_item.setFlags(
+                number_item.flags() & ~Qt.ItemFlag.ItemIsEditable
+            )
+            self.track_title_table.setItem(row, 0, number_item)
+            self.track_title_table.setItem(row, 1, QTableWidgetItem(""))
+
+        self.metadata_status_label.setText(
+            f"{track_count}トラックを検出しました。"
+            "アルバム名・アーティスト名・トラック名は任意入力です。"
+        )
+
     def _choose_output_path(self) -> None:
         volume: Volume | None = self.device_combo.currentData()
         is_audio = volume is not None and volume.media_type == MediaType.CD_AUDIO
@@ -268,6 +381,136 @@ class MainWindow(QMainWindow):
                 return audio_format
 
         return AudioFormat.ALAC
+
+    # -- メタデータ（音楽CD） -------------------------------------------
+
+    def _on_metadata_lookup_clicked(self) -> None:
+        """「オンラインで検索」ボタン。明示的なクリックでのみ通信する。"""
+        if self._disc_toc is None:
+            QMessageBox.warning(
+                self,
+                "検索エラー",
+                "トラック情報を取得できていないため検索できません。",
+            )
+            return
+
+        disc_id = disc_id_from_disc_toc(self._disc_toc)
+
+        self.metadata_lookup_button.setEnabled(False)
+        self.metadata_status_label.setText(
+            "MusicBrainzに問い合わせています…"
+        )
+
+        worker = MetadataLookupWorker(disc_id, parent=self)
+        worker.finished_lookup.connect(self._on_metadata_lookup_finished)
+
+        self._metadata_lookup_worker = worker
+        worker.start()
+
+    def _on_metadata_lookup_finished(self, result: LookupResult) -> None:
+        self.metadata_lookup_button.setEnabled(True)
+        self._metadata_lookup_worker = None
+
+        if not result.ok:
+            self.metadata_status_label.setText(f"検索エラー: {result.error}")
+            return
+
+        if not result.candidates:
+            self.metadata_status_label.setText(
+                "見つかりませんでした。手動で入力してください。"
+            )
+            return
+
+        if len(result.candidates) == 1:
+            candidate = result.candidates[0]
+        else:
+            labels = [c.display_label for c in result.candidates]
+            label, ok = QInputDialog.getItem(
+                self,
+                "候補の選択",
+                f"{len(labels)}件の候補が見つかりました。選んでください:",
+                labels,
+                0,
+                False,
+            )
+
+            if not ok:
+                self.metadata_status_label.setText(
+                    f"{len(labels)}件見つかりましたが、選択されませんでした。"
+                )
+                return
+
+            candidate = result.candidates[labels.index(label)]
+
+        if self._has_existing_metadata_input():
+            reply = QMessageBox.question(
+                self,
+                "上書きの確認",
+                "既に入力されている内容を、検索結果で上書きしますか？",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
+            )
+
+            if reply != QMessageBox.StandardButton.Yes:
+                self.metadata_status_label.setText(
+                    "入力内容は変更していません。"
+                )
+                return
+
+        self._apply_album_metadata(candidate.album)
+        self.metadata_status_label.setText(
+            "メタデータを反映しました。内容を確認してください。"
+        )
+
+    def _has_existing_metadata_input(self) -> bool:
+        if self.album_edit.text().strip() or self.artist_edit.text().strip():
+            return True
+
+        for row in range(self.track_title_table.rowCount()):
+            item = self.track_title_table.item(row, 1)
+
+            if item is not None and item.text().strip():
+                return True
+
+        return False
+
+    def _apply_album_metadata(self, album: AlbumMetadata) -> None:
+        self.album_edit.setText(album.album)
+        self.artist_edit.setText(album.artist)
+        self.year_edit.setText(album.year or "")
+
+        row_count = min(self.track_title_table.rowCount(), len(album.tracks))
+
+        for row in range(row_count):
+            item = self.track_title_table.item(row, 1)
+
+            if item is not None:
+                item.setText(album.tracks[row].title)
+
+    def _collect_album_metadata(self) -> AlbumMetadata | None:
+        """入力欄の内容から ``AlbumMetadata`` を組み立てる。
+
+        すべて未入力の場合は ``None`` を返す（従来通りタグ付けなし・
+        ``TrackNN`` のファイル名のままにするため）。
+        """
+        album = self.album_edit.text().strip()
+        artist = self.artist_edit.text().strip()
+        year = self.year_edit.text().strip() or None
+
+        tracks: list[TrackMetadata] = []
+
+        for row in range(self.track_title_table.rowCount()):
+            item = self.track_title_table.item(row, 1)
+            tracks.append(
+                TrackMetadata(title=item.text().strip() if item else "")
+            )
+
+        if not album and not artist and not any(t.title for t in tracks):
+            return None
+
+        return AlbumMetadata(
+            album=album, artist=artist, year=year, tracks=tracks
+        )
 
     # -- 実行 ---------------------------------------------------------
 
@@ -422,6 +665,7 @@ class MainWindow(QMainWindow):
             audio_format,
             self._audio_work_tmpdir.name,
             verify=self.verify_checkbox.isChecked(),
+            album_metadata=self._collect_album_metadata(),
             parent=self,
         )
 
@@ -468,6 +712,12 @@ class MainWindow(QMainWindow):
             radio.setEnabled(enabled)
 
         self.verify_checkbox.setEnabled(enabled)
+
+        self.album_edit.setEnabled(enabled)
+        self.artist_edit.setEnabled(enabled)
+        self.year_edit.setEnabled(enabled)
+        self.track_title_table.setEnabled(enabled)
+        self.metadata_lookup_button.setEnabled(enabled)
 
         # 中断ボタンは処理中（enabled=False）のみ有効にする。
         self.cancel_button.setEnabled(not enabled)

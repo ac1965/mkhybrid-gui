@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
+from mkhybrid_gui.config import get_config
+
 
 class DiskUtilError(RuntimeError):
     """``diskutil`` コマンドの実行に失敗した場合に送出する。"""
@@ -45,18 +47,15 @@ class MediaType(str, Enum):
     BD = "Blu-ray (BD/BDXL/M-DISC)"
 
 
-# 判定用のサイズ閾値（バイト）。
-_CD_MAX_BYTES = 1_000_000_000
-_DVD_MAX_BYTES = 10_000_000_000
-
-
 def detect_media_type(
     volume: Volume, filesystem_type: str | None
 ) -> MediaType | None:
     """ボリュームのファイルシステム種別・サイズからメディア種別を推定する。
 
     BDXL・M-DISCは、OSからは通常のBD-R/BD-REと同じファイルシステムで
-    マウントされるため、容量ベースでBlu-rayとして分類する。
+    マウントされるため、容量ベースでBlu-rayとして分類する。サイズの
+    閾値は ``config.get_config().media_size`` から取得する（既定値・
+    設定ファイルでの上書きは ``config.py`` を参照）。
 
     返り値が ``None`` の場合、そのボリュームは光学メディアとして
     扱うべきでないことを示す（例: 内蔵APFSボリューム）。
@@ -68,12 +67,16 @@ def detect_media_type(
     ``filesystem_type`` が ``None``（＝ ``diskutil info`` 自体が
     失敗し、光学メディアかどうか判別する材料がない）の場合に限る。
     """
+    thresholds = get_config().media_size
+    cd_max_bytes = thresholds.cd_max_bytes
+    dvd_max_bytes = thresholds.dvd_max_bytes
+
     if filesystem_type is None:
         # ファイルシステム情報が取得できない場合はサイズから推定する。
-        if volume.size <= _CD_MAX_BYTES:
+        if volume.size <= cd_max_bytes:
             return MediaType.CD_DATA
 
-        if volume.size <= _DVD_MAX_BYTES:
+        if volume.size <= dvd_max_bytes:
             return MediaType.DVD
 
         return MediaType.BD
@@ -86,14 +89,14 @@ def detect_media_type(
     if fs == "cd9660":
         return (
             MediaType.CD_DATA
-            if volume.size <= _CD_MAX_BYTES
+            if volume.size <= cd_max_bytes
             else MediaType.DVD
         )
 
     if fs == "udf":
         return (
             MediaType.DVD
-            if volume.size <= _DVD_MAX_BYTES
+            if volume.size <= dvd_max_bytes
             else MediaType.BD
         )
 

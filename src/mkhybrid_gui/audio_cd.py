@@ -39,12 +39,38 @@ from enum import Enum
 from functools import lru_cache
 from pathlib import Path
 
+import mutagen.aiff
+import mutagen.flac
+import mutagen.id3
+import mutagen.mp4
+import mutagen.wave
+
+from mkhybrid_gui.config import get_config
+from mkhybrid_gui.metadata import (
+    LEAD_IN_FRAMES,
+    AlbumMetadata,
+    compute_disc_id,
+    sanitize_filename_component,
+)
+
 ProgressCallback = Callable[[str], None]
 ProgressPercentCallback = Callable[[int], None]
 ProcessStartedCallback = Callable[["subprocess.Popen[str]"], None]
 CancelCheck = Callable[[], bool]
 
 _TRACK_LINE_RE = re.compile(r"^\s*(\d+)\.\s")
+
+#: ``cd-paranoia -Q`` の1トラック分の行から、トラック番号と開始セクタ
+#: （"begin"列の生の整数）を取り出す。例:
+#:   "  2.    28653 [06:22.03]    17462 [03:52.62]    no   no  2"
+#: -> track_number=2, begin_sector=17462
+_TRACK_OFFSET_RE = re.compile(
+    r"^\s*(\d+)\.\s+\d+\s+\[[^\]]*\]\s+(\d+)\s+\[[^\]]*\]"
+)
+
+#: ``TOTAL`` 行から、リードアウト位置（生セクタ）を取り出す。例:
+#:   "TOTAL    65960 [14:39.10]    (audio only)"
+_TOTAL_LINE_RE = re.compile(r"^TOTAL\s+(\d+)\s+\[[^\]]*\]")
 
 
 class AudioCdError(RuntimeError):
@@ -237,6 +263,111 @@ def query_track_count(device: str | None = None) -> int:
     return parse_track_count(result.stderr + result.stdout)
 
 
+# --- TOC（目次情報）の取得・Disc ID計算 ---------------------------------
+
+
+@dataclass(frozen=True)
+class DiscToc:
+    """音楽CDのTOC（目次情報）。MusicBrainz Disc ID計算に使う。
+
+    ここでの値は ``cd-paranoia -Q`` が報告する生のセクタ値であり、
+    ``metadata.LEAD_IN_FRAMES`` の加算はまだ行っていない
+    （加算は ``disc_id_from_toc`` が行う）。
+    """
+
+    track_offsets: list[int]
+    leadout_offset: int
+
+
+def parse_disc_toc(query_output: str) -> DiscToc:
+    """``cd-paranoia -Q`` の出力から、各トラックの開始位置とリードアウト位置を求める。"""
+    offsets_by_track: dict[int, int] = {}
+
+    for line in query_output.splitlines():
+        match = _TRACK_OFFSET_RE.match(line)
+
+        if match is not None:
+            offsets_by_track[int(match.group(1))] = int(match.group(2))
+
+    if not offsets_by_track:
+        raise AudioCdError(
+            "音楽CDのTOC情報を取得できませんでした（cd-paranoia -Q）。"
+        )
+
+    leadout_offset: int | None = None
+
+    for line in query_output.splitlines():
+        match = _TOTAL_LINE_RE.match(line)
+
+        if match is not None:
+            leadout_offset = int(match.group(1))
+            break
+
+    if leadout_offset is None:
+        raise AudioCdError(
+            "音楽CDのリードアウト位置を取得できませんでした（cd-paranoia -Q）。"
+        )
+
+    track_offsets = [
+        offsets_by_track[number] for number in sorted(offsets_by_track)
+    ]
+
+    return DiscToc(track_offsets=track_offsets, leadout_offset=leadout_offset)
+
+
+def disc_id_from_disc_toc(toc: DiscToc) -> str:
+    """既に取得済みの ``DiscToc`` からMusicBrainz Disc IDを計算する。
+
+    GUI側でトラック数（テーブルの行数）とDisc IDの両方が必要な場合、
+    ``query_disc_toc()`` を1回だけ呼んでこの関数に渡せば、
+    ``cd-paranoia -Q`` を二重に実行せずに済む。
+    """
+    track_offsets = [
+        offset + LEAD_IN_FRAMES for offset in toc.track_offsets
+    ]
+    leadout_offset = toc.leadout_offset + LEAD_IN_FRAMES
+
+    return compute_disc_id(
+        first_track=1,
+        last_track=len(toc.track_offsets),
+        leadout_offset=leadout_offset,
+        track_offsets=track_offsets,
+    )
+
+
+def disc_id_from_toc(query_output: str) -> str:
+    """``cd-paranoia -Q`` の出力からMusicBrainz Disc IDを直接計算する。"""
+    return disc_id_from_disc_toc(parse_disc_toc(query_output))
+
+
+def query_disc_toc(device: str | None = None) -> DiscToc:
+    """``cd-paranoia -Q`` を実行し、TOC（目次情報）を取得する。"""
+    cmd = ["cd-paranoia", "-Q"]
+
+    if device:
+        cmd += ["-d", device]
+
+    if _tool_path("cd-paranoia") is None:
+        raise AudioCdError(
+            "cd-paranoia が見つかりません。PATHを確認してください。"
+        )
+
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        check=False,
+        env=_command_env(),
+    )
+
+    return parse_disc_toc(result.stderr + result.stdout)
+
+
+def query_disc_id(device: str | None = None) -> str:
+    """``cd-paranoia -Q`` を実行し、MusicBrainz Disc IDを計算する。"""
+    return disc_id_from_disc_toc(query_disc_toc(device))
+
+
 # --- リッピング（読み取り・誤り訂正・再読込・検証） -----------------------
 
 
@@ -287,7 +418,7 @@ def rip_track_verified(
     on_progress: ProgressCallback | None = None,
     *,
     verify: bool = True,
-    max_attempts: int = 3,
+    max_attempts: int = get_config().audio_rip.max_attempts,
     on_process_started: ProcessStartedCallback | None = None,
     cancel_check: CancelCheck | None = None,
 ) -> RipTrackResult:
@@ -494,6 +625,87 @@ def convert_audio(
         )
 
 
+# --- メタデータのタグ書き込み --------------------------------------------
+
+
+def write_metadata_tags(
+    path: Path,
+    audio_format: AudioFormat,
+    album: AlbumMetadata,
+    track_number: int,
+) -> None:
+    """変換済みファイルに ``mutagen`` でメタデータタグを書き込む。
+
+    アルバム名・アーティスト名・トラックタイトルがいずれも未入力
+    （空文字）の場合は何もしない。トラックタイトルだけが未入力の場合、
+    そのトラックのタイトルは書き込まない（アルバム名・アーティスト名のみ
+    書き込む）。
+    """
+    title = album.track_title(track_number)
+
+    if not (album.album or album.artist or title):
+        return
+
+    track_total = len(album.tracks) or None
+
+    if audio_format in (AudioFormat.ALAC, AudioFormat.AAC):
+        audio = mutagen.mp4.MP4(str(path))
+
+        if album.album:
+            audio["\xa9alb"] = [album.album]
+        if album.artist:
+            audio["\xa9ART"] = [album.artist]
+        if title:
+            audio["\xa9nam"] = [title]
+        if album.year:
+            audio["\xa9day"] = [album.year]
+
+        audio["trkn"] = [(track_number, track_total or 0)]
+        audio.save()
+        return
+
+    if audio_format == AudioFormat.FLAC:
+        audio = mutagen.flac.FLAC(str(path))
+
+        if album.album:
+            audio["ALBUM"] = album.album
+        if album.artist:
+            audio["ARTIST"] = album.artist
+        if title:
+            audio["TITLE"] = title
+        if album.year:
+            audio["DATE"] = album.year
+
+        audio["TRACKNUMBER"] = str(track_number)
+        audio.save()
+        return
+
+    # WAV / AIFF: ID3v2タグをチャンクとして埋め込む。
+    audio_cls = (
+        mutagen.wave.WAVE
+        if audio_format == AudioFormat.WAV
+        else mutagen.aiff.AIFF
+    )
+    audio = audio_cls(str(path))
+
+    if audio.tags is None:
+        audio.add_tags()
+
+    if album.album:
+        audio.tags.add(mutagen.id3.TALB(encoding=3, text=[album.album]))
+    if album.artist:
+        audio.tags.add(mutagen.id3.TPE1(encoding=3, text=[album.artist]))
+    if title:
+        audio.tags.add(mutagen.id3.TIT2(encoding=3, text=[title]))
+    if album.year:
+        audio.tags.add(mutagen.id3.TDRC(encoding=3, text=[album.year]))
+
+    audio.tags.add(
+        mutagen.id3.TRCK(encoding=3, text=[str(track_number)])
+    )
+    audio.save()
+
+
 # --- ディスク全体のリッピング -------------------------------------------
 
 
@@ -533,10 +745,11 @@ def rip_and_convert_disc(
     on_progress: ProgressCallback | None = None,
     *,
     verify: bool = True,
-    max_attempts: int = 3,
+    max_attempts: int = get_config().audio_rip.max_attempts,
     on_percent: ProgressPercentCallback | None = None,
     on_process_started: ProcessStartedCallback | None = None,
     cancel_check: CancelCheck | None = None,
+    album_metadata: AlbumMetadata | None = None,
 ) -> RipResult:
     """音楽CDの全トラックをリッピングし、指定フォーマットで
     ``destination_dir`` に書き出す。
@@ -544,6 +757,12 @@ def rip_and_convert_disc(
     ``on_percent`` にはトラック単位の粗い進捗率（0〜100）を通知する。
     ``cancel_check`` が ``True`` を返した時点で、以降のトラック処理を
     行わずに安全に打ち切る（``RipResult.cancelled`` が ``True`` になる）。
+
+    ``album_metadata`` が指定され、該当トラックにタイトルが入力されている
+    場合、出力ファイル名は ``NN - タイトル.ext`` になり、``mutagen`` で
+    タグ（アルバム名・アーティスト名・トラック名・年）を書き込む。
+    ``album_metadata`` が ``None``、またはタイトル未入力の場合は従来通り
+    ``TrackNN.ext`` のままタグ付けは行わない。
     """
     dest = Path(destination_dir)
     dest.mkdir(parents=True, exist_ok=True)
@@ -589,10 +808,20 @@ def rip_and_convert_disc(
             failed.append((track_number, str(exc)))
             continue
 
-        target = (
-            dest
-            / f"Track{track_number:02d}{output_extension(audio_format)}"
+        track_title = (
+            album_metadata.track_title(track_number)
+            if album_metadata is not None
+            else ""
         )
+        ext = output_extension(audio_format)
+
+        if track_title:
+            sanitized_title = sanitize_filename_component(track_title)
+            filename = f"{track_number:02d} - {sanitized_title}{ext}"
+        else:
+            filename = f"Track{track_number:02d}{ext}"
+
+        target = dest / filename
 
         try:
             convert_audio(
@@ -611,6 +840,18 @@ def rip_and_convert_disc(
             continue
         finally:
             rip_result.wav_path.unlink(missing_ok=True)
+
+        if album_metadata is not None:
+            try:
+                write_metadata_tags(
+                    target, audio_format, album_metadata, track_number
+                )
+            except Exception as exc:  # noqa: BLE001
+                if on_progress is not None:
+                    on_progress(
+                        f"警告: トラック{track_number}のタグ書き込みに"
+                        f"失敗しました: {exc}"
+                    )
 
         tracks.append(
             TrackOutcome(
@@ -652,6 +893,7 @@ if QThread is not None:
             audio_format: AudioFormat,
             work_dir: str | Path,
             verify: bool = True,
+            album_metadata: AlbumMetadata | None = None,
             parent=None,
         ) -> None:
             super().__init__(parent)
@@ -660,6 +902,7 @@ if QThread is not None:
             self._audio_format = audio_format
             self._work_dir = work_dir
             self._verify = verify
+            self._album_metadata = album_metadata
             self._process: subprocess.Popen[str] | None = None
             self._cancel_requested = False
 
@@ -695,6 +938,7 @@ if QThread is not None:
                     on_percent=self.progress_percent.emit,
                     on_process_started=self._capture_process,
                     cancel_check=self._is_cancelled,
+                    album_metadata=self._album_metadata,
                 )
             except AudioCdError as exc:
                 self.finished_ok.emit(False, str(exc))

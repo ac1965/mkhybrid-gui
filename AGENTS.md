@@ -8,10 +8,11 @@
 - **目的**: macOSに接続した光学ドライブの内容を、`hdiutil makehybrid` を用いて Windows/Linux 双方で読み取り可能なハイブリッドISOイメージに変換するGUIツールを提供する。
 - **対応メディア**: データCD / 音楽CD（Audio CD） / DVD / Blu-ray（BD）。BDXL（大容量BD）・M-DISC（アーカイブ用メディア）は、OS上は通常のBD-R/BD-REと同じファイルシステムでマウントされるため、追加のメディア種別分岐は不要（[disk_utils.py](src/mkhybrid_gui/disk_utils.py) の `detect_media_type` はサイズベースの判定でこれらを自然にカバーする）。
   - データCD/DVD/BD: `hdiutil makehybrid` でISOイメージ化（ISO9660 + Joliet + Rock Ridge、DVD/BDでは大容量ファイル対応のUDFを追加可能）。
-  - 音楽CD: [audio_cd.py](src/mkhybrid_gui/audio_cd.py) が `cd-paranoia`（誤り訂正・再読込付きの正確なリッピング）でWAVを取得し、`afconvert`（ALAC/AIFF/AAC）または `flac`（FLAC）でユーザー選択の形式に変換する。WAVはそのまま採用する。macOS標準のCDDAFSマウント（単純なAIFFコピー）は誤り訂正・検証ができないため使用しない。
+  - 音楽CD: [audio_cd.py](src/mkhybrid_gui/audio_cd.py) が `cd-paranoia`（誤り訂正・再読込付きの正確なリッピング）でWAVを取得し、`afconvert`（ALAC/AIFF/AAC）または `flac`（FLAC）でユーザー選択の形式に変換する。WAVはそのまま採用する。macOS標準のCDDAFSマウント（単純なAIFFコピー）は誤り訂正・検証ができないため使用しない。アルバム名・アーティスト名・トラック名は手動入力、または[musicbrainz.py](src/mkhybrid_gui/musicbrainz.py)経由のMusicBrainzオンライン検索（オプトイン）で取得し、[mutagen](https://mutagen.readthedocs.io/)でファイルにタグ付けする。
 - **対象OS**: macOS専用（`hdiutil` / `diskutil` はmacOS標準コマンドに依存するため、Windows/Linuxでは動作しない）。
 - **追加の外部依存（Homebrew）**: `cd-paranoia`（音楽CDの正確なリッピングに必須。Homebrewパッケージ名は `libcdio-paranoia`）、`flac`（FLAC書き出し時のみ必須。パッケージ名も `flac`）。これらはmacOS標準コマンドではないため、利用者に `brew install libcdio-paranoia flac` の実行を求める。ISOイメージ作成（データCD/DVD/BD）はこれらに依存しない。
   - コマンド名とHomebrewパッケージ名が一致しない（`cd-paranoia` ⇔ `libcdio-paranoia`）ため、パッケージ名を書く箇所では取り違えないこと。対応表は [main_window.py](src/mkhybrid_gui/ui/main_window.py) の `_BREW_PACKAGES` を参照。
+- **追加の外部依存（PyPI）**: [`mutagen`](https://mutagen.readthedocs.io/)（音楽ファイルへのタグ書き込みに必須。`pyproject.toml` の `dependencies` に含まれ、Homebrewではなく `pip install -e ".[dev]"` で導入される）。純Python実装で外部バイナリに依存しない。ネットワーク通信自体は標準ライブラリの `urllib.request` のみを使い、`musicbrainz.py` のために追加パッケージを導入しない（新たな依存を増やす前に、まず標準ライブラリで足りないか検討すること）。
 - **外部コマンドの解決（PATH）**: GUIアプリとして（Finder等から）起動された場合でも、macOS/launchdはプロセスに `/usr/bin:/bin:/usr/sbin:/sbin` 程度の最小限の`PATH`を設定するため、`PATH`が非空であることは「必要なコマンドが見つかる」ことを意味しない。[audio_cd.py](src/mkhybrid_gui/audio_cd.py) の `_effective_path()` は、`PATH`の空/非空にかかわらず**常に**ログインシェルの`PATH`（Homebrewのインストール先を含む）を取得してプロセスの`PATH`とマージする。「`PATH`が空の場合だけログインシェルを問い合わせる」という条件分岐に戻すと、GUI起動時にHomebrewのコマンドが見つからなくなる回帰バグになるため、変更する際は必ずこの前提を守ること。
 - **想定ユーザー**: 社内配布用メディアの作成を行う非エンジニアも含む担当者。CLIを意識させず、GUIから完結させる。
 
@@ -49,15 +50,22 @@
 ├── src/
 │   └── mkhybrid_gui/
 │       ├── app.py              # エントリポイント / GUI起動
+│       ├── config.py           # 設定値の集約・config.tomlの読み込み（AppConfig）
 │       ├── disk_utils.py       # diskutil list/info のパース、メディア種別（MediaType）判定
-│       ├── iso_builder.py      # hdiutil makehybrid / verify のラッパー、IsoWorker(QThread)
-│       ├── audio_cd.py         # cd-paranoiaによる正確なリッピング、afconvert/flacでの形式変換、AudioRipWorker(QThread)
+│       ├── iso_builder.py      # hdiutil makehybrid / 検証(attach+verifyVolume) のラッパー、IsoWorker(QThread)
+│       ├── audio_cd.py         # cd-paranoiaによる正確なリッピング、afconvert/flacでの形式変換、TOC解析、mutagenタグ付け、AudioRipWorker(QThread)
+│       ├── metadata.py         # AlbumMetadata/TrackMetadata、MusicBrainz Disc ID計算（純ロジック）
+│       ├── musicbrainz.py      # MusicBrainz Web Serviceへの問い合わせ（urllib標準ライブラリのみ）、MetadataLookupWorker(QThread)
 │       └── ui/
-│           └── main_window.py  # PySide6ウィジェット定義（メディア種別に応じてUIを切替）
+│           └── main_window.py  # PySide6ウィジェット定義（メディア種別に応じてUIを切替、音楽CDメタデータ入力欄）
 ├── tests/
+│   ├── conftest.py          # 全テスト共通フィクスチャ（実環境の設定ファイルからの隔離等）
+│   ├── test_config.py
 │   ├── test_disk_utils.py
 │   ├── test_iso_builder.py
-│   └── test_audio_cd.py
+│   ├── test_audio_cd.py
+│   ├── test_metadata.py
+│   └── test_musicbrainz.py
 └── mkhybrid_gui.spec        # PyInstaller用
 ```
 
@@ -101,7 +109,7 @@ make distclean  # clean に加えて .venv も削除
 - `subprocess` 呼び出しは `shell=True` を使わず、引数はリストで渡す（パスにスペースや日本語が含まれるケースに対応するため）。
 - macOS依存コマンド（`hdiutil`, `diskutil`）の実行結果は必ずreturncodeとstderrをチェックし、GUI側にエラーメッセージとして表示する。
 - ハードコードされた `/dev/diskN` を避け、`diskutil list -plist` の出力をパースして選択肢をユーザーに提示する。
-- ビジネスロジック層（`disk_utils.py`, `iso_builder.py`, `audio_cd.py`）はUIフレームワーク（PySide6）に依存しない設計とし、単体でテスト可能にする。
+- ビジネスロジック層（`disk_utils.py`, `iso_builder.py`, `audio_cd.py`, `metadata.py`, `musicbrainz.py`, `config.py`）はUIフレームワーク（PySide6）に依存しない設計とし、単体でテスト可能にする。`musicbrainz.py` はネットワークI/O部分（`url_opener`）を差し替え可能にし、実ネットワークを使わずにテストできるようにする。
 
 ## 主要な実装要件（機能仕様）
 
@@ -129,12 +137,19 @@ make distclean  # clean に加えて .venv も削除
    - 検証後は成功・失敗によらず必ず `hdiutil detach` でデタッチする。
 6. **エラーハンドリング**: コピーガード付きメディア等でセクタ単位読み取りが必要なケースを検出できない場合は、明確なエラーメッセージを表示し、対処法（別ツールの利用など）を案内する。
 7. **安全な中断**: 実行中のISO作成・音楽CDリッピングは、GUI上の「中断」ボタンから中断できること。中断時は実行中の外部コマンドへ `terminate`（SIGTERM）を送り、作成途中の一時ファイル（WAV・部分的なISO等）を削除してから完了通知を出す（`IsoWorker.request_cancel` / `AudioRipWorker.request_cancel`、`audio_cd.RipCancelled`）。また、処理中はウィンドウを閉じられないようにし（`MainWindow.closeEvent`）、実行中のバックグラウンドスレッドを残したままアプリが終了しないようにすること。
+8. **音楽CDのメタデータ**: 音楽CD選択時、アルバム名・アーティスト名・年・各トラック名を入力できるようにする（`metadata.AlbumMetadata`/`TrackMetadata`）。入力内容は以下に反映する。
+   - **ファイル名**: トラックタイトルが入力されている場合は `NN - タイトル.拡張子`、未入力なら従来通り `TrackNN.拡張子`（`audio_cd.rip_and_convert_disc` 内、`metadata.sanitize_filename_component` でファイル名として安全な文字列に変換）。
+   - **タグ**: `mutagen` を使い、形式ごとに適切なタグへ書き込む（`audio_cd.write_metadata_tags`）。MP4(ALAC/AAC)はiTunes系アトム、FLACはVorbis Comment、WAV/AIFFはID3v2。全項目未入力（アルバム名・アーティスト名・全トラックタイトルが空）ならタグ付けをスキップする。
+   - **オンライン検索**: 「オンラインで検索（MusicBrainz）」ボタン（GUI上の明示的なクリックでのみ動作、自動実行しない）で、ディスクのTOCから計算した [MusicBrainz Disc ID](https://musicbrainz.org/doc/Disc_ID_Calculation)（`audio_cd.query_disc_toc` + `audio_cd.disc_id_from_disc_toc`）を使い `musicbrainz.lookup_releases` でMusicBrainzに問い合わせる。0件・複数件・ネットワークエラーのいずれも例外を投げず `LookupResult` として返し、リッピング処理自体を止めないこと。複数候補時はユーザーに選ばせ、既に入力がある場合は上書き前に確認する。
+   - MusicBrainz API利用時は、意味のある `User-Agent` を送信し、1秒1リクエストのレート制限を守ること（`musicbrainz._wait_for_rate_limit`）。
 
 ## テスト
 
 - `disk_utils.py` のパース処理・メディア種別判定（`detect_media_type`）は `diskutil list -plist` / `diskutil info -plist` のサンプル出力を固定データとして用意し、ユニットテストでカバーする。
 - `iso_builder.py` は実際のCD-ROMを使わず、`subprocess.run`/`subprocess.Popen` をモック化してコマンド組み立て・実行結果処理のみを検証する。
-- `audio_cd.py` は実際の音楽CD・cd-paranoia/afconvert/flacバイナリを使わず、`subprocess.run`/`subprocess.Popen` をモック化してトラック数解析・コマンド組み立て・検証ロジック（複数回読み取りの一致判定）・変換処理を検証する。
+- `audio_cd.py` は実際の音楽CD・cd-paranoia/afconvert/flacバイナリを使わず、`subprocess.run`/`subprocess.Popen` をモック化してトラック数解析・コマンド組み立て・検証ロジック（複数回読み取りの一致判定）・変換処理を検証する。ただし `write_metadata_tags`（`mutagen`）は外部バイナリに依存しない純Pythonのため、モックせず実際に妥当なフォーマットの最小限のファイル（`wave`標準モジュールやバイト列を直接組み立てて生成、Homebrew依存の`flac`バイナリや非推奨の`aifc`モジュールは使わない）を用意してタグの読み書きをテストする。
+- `metadata.py` の `compute_disc_id` は、実際にMusicBrainz APIへ問い合わせて確認した実データ（disc id・offsets・sectors）をテストベクタとして使う（当てずっぽうの値やlibdiscid由来の値を使わない）。
+- `musicbrainz.py` は実ネットワークを使わず、`url_opener` を差し替えたフェイクレスポンスで正常系（0/1/複数件）・HTTPエラー・タイムアウト・不正JSONを検証する。
 - GUI部分のテストには `pytest-qt`（`qtbot`）を用いる（現状 `pyproject.toml` の `dev` extrasには含めているが、`main_window.py` に対する実際のテストは未整備。README.md の「ロードマップ・既知の制限」で追跡している）。
 - 実機（実CD-ROM/DVD/BD/音楽CD）を使った結合テストはCI対象外とし、手動確認手順をREADMEに記載する。
 
@@ -152,6 +167,9 @@ make distclean  # clean に加えて .venv も削除
 - `iso_builder.verify_iso()` を `hdiutil verify` ベースの実装に戻さない。`hdiutil makehybrid` が生成するイメージにはチェックサムが一切含まれないため（実機確認済み）、`hdiutil verify` は正常なISOイメージに対しても必ず失敗し、ISO作成が実際には成功しているのに毎回「失敗」と誤報告する重大な回帰になる。
 - 実行中のワーカースレッド（`IsoWorker`/`AudioRipWorker`）を残したままウィンドウを閉じられるようにしない（`MainWindow.closeEvent` のガードを外さない）。
 - `disk_utils.detect_media_type()` を、`filesystem_type` が既知の非光学ファイルシステム（`apfs`/`hfs+`/`exfat` 等）と判明している場合にもサイズだけでCD/DVD/BDと判定するように戻さない。サイズベースの推定フォールバックは `filesystem_type is None`（＝真に判別材料がない場合）に限ること。これを怠ると、内蔵の起動ディスク（Macintosh HD等）がGUIのドライブ選択肢に「Blu-ray」「データCD」等として表示され、誤って選択できてしまう（実機のMacで実際に再現・修正済みの回帰）。
+- MusicBrainzへの問い合わせ（`musicbrainz.lookup_releases`）を、ユーザーの明示的なボタン操作なしに自動実行しない（デバイス選択時やアプリ起動時に暗黙で通信を発生させない）。
+- MusicBrainz APIのレート制限（1秒1リクエスト）を無視して連続で問い合わせない。IPアドレスがブロックされるリスクがある。`musicbrainz._wait_for_rate_limit` を経由しないネットワーク呼び出しを追加しない。
+- `metadata.compute_disc_id()` の実装を、実データで検証した仕様（オフセットは生LBAに `LEAD_IN_FRAMES`(150)を加算したフレーム値、SHA-1 + Base64の`+/=`を`._-`に置換）から離れた形に変更しない。1文字でもズレると生成されるDisc IDが全く別物になり、無音で「見つかりません」という結果になる（検出しにくいバグになるため要注意）。
 
 ## コミット/PR規約
 
