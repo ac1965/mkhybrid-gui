@@ -775,7 +775,97 @@ def test_choose_output_path_updates_last_output_directory_for_audio(
     window._choose_output_path()
 
     assert window.output_edit.text() == str(tmp_path)
+
+
+def test_apply_config_populates_settings_output_dir_field(
+    qtbot, window: MainWindow
+) -> None:
+    app_config = config.AppConfig(
+        ui=config.UiPreferences(
+            last_output_directory="/Users/ac1965/Downloads/Music/"
+        )
+    )
+
+    window._apply_config(app_config)
+
+    assert (
+        window.settings_output_dir_edit.text()
+        == "/Users/ac1965/Downloads/Music/"
+    )
+
+
+def test_settings_output_dir_browse_updates_field_and_audio_output(
+    qtbot,
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """設定タブでの変更は、音楽CDモードなら「作成」タブの出力先欄にも
+    即座に反映する。
+    """
+    monkeypatch.setattr(
+        main_window_module,
+        "query_disc_toc",
+        lambda device: DiscToc(track_offsets=[0], leadout_offset=1000),
+    )
+    window.show()
+    _select_volume(window, _audio_volume())
+
+    monkeypatch.setattr(
+        main_window_module.QFileDialog,
+        "getExistingDirectory",
+        lambda *a, **k: str(tmp_path),
+    )
+
+    window._on_settings_output_dir_browse_clicked()
+
     assert window._last_output_directory == str(tmp_path)
+    assert window.settings_output_dir_edit.text() == str(tmp_path)
+    assert window.output_edit.text() == str(tmp_path)
+
+
+def test_settings_output_dir_browse_does_not_touch_iso_output_field(
+    qtbot,
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """ISO作成モードでは出力先はファイル名まで必要なため、
+    設定タブでのフォルダ変更で「作成」タブの出力先欄を上書きしない。
+    """
+    window.show()
+    _select_volume(window, _dvd_volume())
+    window.output_edit.setText("/existing/output.iso")
+
+    monkeypatch.setattr(
+        main_window_module.QFileDialog,
+        "getExistingDirectory",
+        lambda *a, **k: str(tmp_path),
+    )
+
+    window._on_settings_output_dir_browse_clicked()
+
+    assert window._last_output_directory == str(tmp_path)
+    assert window.settings_output_dir_edit.text() == str(tmp_path)
+    assert window.output_edit.text() == "/existing/output.iso"
+
+
+def test_settings_output_dir_browse_cancelled_changes_nothing(
+    window: MainWindow, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    window._last_output_directory = "/original/path"
+    window.settings_output_dir_edit.setText("/original/path")
+
+    monkeypatch.setattr(
+        main_window_module.QFileDialog,
+        "getExistingDirectory",
+        lambda *a, **k: "",
+    )
+
+    window._on_settings_output_dir_browse_clicked()
+
+    assert window._last_output_directory == "/original/path"
+    assert window.settings_output_dir_edit.text() == "/original/path"
 
 
 # --- 設定タブ（サイズ閾値・検証リトライ回数） ------------------------------

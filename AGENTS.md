@@ -153,6 +153,7 @@ make distclean  # clean に加えて .venv も削除
    - `MainWindow.__init__()` はウィジェット構築直後に `config.get_config()` を読み込んで両タブの各ウィジェット（Joliet/Rock Ridge/UDFチェックボックス、検証チェックボックス、書き出し形式ラジオボタン、出力先ダイアログの初期フォルダ、設定タブのスピンボックス群）へ反映し（`_apply_config`）、`closeEvent()`（ワーカー実行中でない場合のみ）で両タブの現在の状態をまとめて保存する（`_save_current_settings`、内部で `_collect_current_config` を使用）。設定ファイルへの書き込みに失敗しても（権限不足等）アプリの終了自体は妨げない。
    - `last_output_directory` は「参照…」ダイアログの初期フォルダとしてだけでなく、音楽CD選択時（`_on_device_changed`でis_audio判定時）に出力先フォルダ欄が空であれば、その初期値としても直接反映すること。ダイアログの初期フォルダとしてのみ使い、欄自体に反映しないと、「前回と同じフォルダに書き出したいだけなのに毎回「参照…」を押し直す必要がある」という実機での報告どおりの不満につながる（`tests/test_main_window.py`の`test_selecting_audio_cd_prefills_output_folder_from_last_directory`で検証済み）。ISO作成では出力先はファイル名まで必要なため、この補完はis_audioの場合のみに限ること。
    - `audio_format` は表示ラベルではなく `AudioFormat` のメンバー名（例: `"ALAC"`）で保存する。読み込み時に未知の値であれば `AudioFormat.ALAC` にフォールバックする。
+   - 「設定」タブには、`last_output_directory` を表示専用（読み取り専用）で見せる欄と、Finderの標準的なフォルダ選択ダイアログで変更できる「参照…」ボタンを置く（`settings_output_dir_edit`/`_on_settings_output_dir_browse_clicked`）。ここで変更した値は、現在「作成」タブが音楽CDモードであれば出力先フォルダ欄にも即座に反映する（ISO作成モードでは出力先はファイル名まで必要なため上書きしない）。これが無いと「音楽CDの出力先を変えたいだけなのに、一度ドライブを選び直さないと変更できない」という不満につながる（実機での報告により追加）。
 
 ## テスト
 

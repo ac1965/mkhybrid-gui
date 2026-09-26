@@ -281,6 +281,19 @@ class MainWindow(QMainWindow):
             "音楽CD検証の最大試行回数:", self.audio_verify_attempts_spin
         )
 
+        output_dir_row = QHBoxLayout()
+        self.settings_output_dir_edit = QLineEdit()
+        self.settings_output_dir_edit.setReadOnly(True)
+        self.settings_output_dir_browse_button = QPushButton("参照…")
+        self.settings_output_dir_browse_button.clicked.connect(
+            self._on_settings_output_dir_browse_clicked
+        )
+        output_dir_row.addWidget(self.settings_output_dir_edit, stretch=1)
+        output_dir_row.addWidget(self.settings_output_dir_browse_button)
+        form.addRow(
+            "音楽CDの既定の出力先フォルダ:", output_dir_row
+        )
+
         # QFormLayoutの2カラム構造（キャプション列/値列）だと、値列の
         # 実効幅がウィンドウ幅に対して狭くなりがちで、長いパス文字列が
         # 折り返されずに途中で見切れてしまう（実機で報告された不具合）。
@@ -347,6 +360,7 @@ class MainWindow(QMainWindow):
         何も変化しない。
         """
         self._last_output_directory = app_config.ui.last_output_directory
+        self.settings_output_dir_edit.setText(self._last_output_directory)
         self.joliet_checkbox.setChecked(app_config.ui.joliet)
         self.rock_checkbox.setChecked(app_config.ui.rock)
         self.udf_checkbox.setChecked(app_config.ui.udf)
@@ -403,6 +417,34 @@ class MainWindow(QMainWindow):
             return False
 
         return True
+
+    def _on_settings_output_dir_browse_clicked(self) -> None:
+        """「設定」タブから、音楽CDの既定の出力先フォルダを変更する。
+
+        Finderの標準的なフォルダ選択ダイアログ（``QFileDialog``）で選び、
+        「作成」タブの出力先フォルダ欄が現在音楽CDモードであれば、
+        そちらにも即座に反映する（ISO作成モードの場合はファイル名まで
+        必要なため上書きしない）。
+        """
+        path = QFileDialog.getExistingDirectory(
+            self,
+            "音楽CDの既定の出力先フォルダを選択",
+            self._last_output_directory or "",
+        )
+
+        if not path:
+            return
+
+        self._last_output_directory = path
+        self.settings_output_dir_edit.setText(path)
+
+        volume: Volume | None = self.device_combo.currentData()
+        is_audio = (
+            volume is not None and volume.media_type == MediaType.CD_AUDIO
+        )
+
+        if is_audio:
+            self.output_edit.setText(path)
 
     def _on_settings_save_clicked(self) -> None:
         """「設定」タブの「設定を保存」ボタン。
