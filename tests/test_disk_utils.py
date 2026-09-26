@@ -11,8 +11,11 @@ from mkhybrid_gui.disk_utils import (
     MediaType,
     Volume,
     detect_media_type,
+    get_media_name,
     list_volumes,
+    mount_disk,
     parse_diskutil_list,
+    unmount_disk,
     whole_disk_raw_device,
 )
 
@@ -27,6 +30,127 @@ def test_whole_disk_raw_device_handles_whole_disk_already() -> None:
 
 def test_whole_disk_raw_device_handles_multi_digit_partition() -> None:
     assert whole_disk_raw_device("disk12s3") == "/dev/rdisk12"
+
+
+# --- get_media_name / unmount_disk / mount_disk -------------------------
+# (cdrdaoがドライブのモデル名でIOKitパスを特定し、排他アクセスのため
+# ディスク全体をアンマウント/再マウントするために使う。)
+
+
+def test_get_media_name_returns_media_name_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(cmd, **kwargs):
+        assert cmd == ["diskutil", "info", "-plist", "/dev/disk4"]
+
+        class FakeCompletedProcess:
+            returncode = 0
+            stdout = plistlib.dumps({"MediaName": "ASUS SDRW-08U9M-U"})
+
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr(
+        "mkhybrid_gui.disk_utils.subprocess.run", fake_run
+    )
+
+    assert get_media_name("disk4") == "ASUS SDRW-08U9M-U"
+
+
+def test_get_media_name_returns_none_when_info_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(cmd, **kwargs):
+        class FakeCompletedProcess:
+            returncode = 1
+            stdout = b""
+
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr(
+        "mkhybrid_gui.disk_utils.subprocess.run", fake_run
+    )
+
+    assert get_media_name("disk4") is None
+
+
+def test_get_media_name_returns_none_when_field_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(cmd, **kwargs):
+        class FakeCompletedProcess:
+            returncode = 0
+            stdout = plistlib.dumps({"DeviceIdentifier": "disk4"})
+
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr(
+        "mkhybrid_gui.disk_utils.subprocess.run", fake_run
+    )
+
+    assert get_media_name("disk4") is None
+
+
+def test_unmount_disk_targets_whole_disk_and_reports_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """パーティション識別子（``disk4s1``）が渡されても、アンマウントは
+    ディスク全体（``disk4``）に対して行う（音楽CDは各トラックが個別の
+    ボリュームとしてマウントされるため、単一パーティションの
+    アンマウントでは不十分）。
+    """
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+
+        class FakeCompletedProcess:
+            returncode = 0
+
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr(
+        "mkhybrid_gui.disk_utils.subprocess.run", fake_run
+    )
+
+    assert unmount_disk("disk4s1") is True
+    assert calls == [["diskutil", "unmountDisk", "/dev/disk4"]]
+
+
+def test_unmount_disk_reports_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(cmd, **kwargs):
+        class FakeCompletedProcess:
+            returncode = 1
+
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr(
+        "mkhybrid_gui.disk_utils.subprocess.run", fake_run
+    )
+
+    assert unmount_disk("disk4") is False
+
+
+def test_mount_disk_targets_whole_disk_and_reports_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+
+        class FakeCompletedProcess:
+            returncode = 0
+
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr(
+        "mkhybrid_gui.disk_utils.subprocess.run", fake_run
+    )
+
+    assert mount_disk("disk4s1") is True
+    assert calls == [["diskutil", "mountDisk", "/dev/disk4"]]
 
 
 SAMPLE_DISKUTIL_LIST = {

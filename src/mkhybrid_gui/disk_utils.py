@@ -23,6 +23,11 @@ class DiskUtilError(RuntimeError):
 _PARTITION_SUFFIX_RE = re.compile(r"s\d+$")
 
 
+def _whole_disk_identifier(device_identifier: str) -> str:
+    """パーティション識別子からディスク全体の識別子を求める（例: ``disk5s1`` -> ``disk5``）。"""
+    return _PARTITION_SUFFIX_RE.sub("", device_identifier)
+
+
 def whole_disk_raw_device(device_identifier: str) -> str:
     """パーティション識別子からディスク全体の生デバイスパスを求める。
 
@@ -34,8 +39,62 @@ def whole_disk_raw_device(device_identifier: str) -> str:
     特定パーティションではなくディスク全体の生デバイスを要求するため、
     この変換が必要になる。
     """
-    whole_disk = _PARTITION_SUFFIX_RE.sub("", device_identifier)
-    return f"/dev/r{whole_disk}"
+    return f"/dev/r{_whole_disk_identifier(device_identifier)}"
+
+
+def get_media_name(device_identifier: str) -> str | None:
+    """``diskutil info -plist`` の ``MediaName``（ドライブのモデル名相当。
+    例: ``"ASUS SDRW-08U9M-U"``）を返す。
+
+    ``cdrdao``が``--device``に要求するIOKitレジストリパスを
+    ``cdrdao scanbus``の出力から特定する際、このモデル名で紐付ける
+    （``cdrdao.find_scsi_device``を参照）。
+    """
+    info = get_disk_info(device_identifier)
+
+    if info is None:
+        return None
+
+    media_name = info.get("MediaName")
+    return media_name if isinstance(media_name, str) and media_name else None
+
+
+def unmount_disk(device_identifier: str) -> bool:
+    """ディスク全体（全パーティション/トラック）をアンマウントする（イジェクトはしない）。
+
+    ``cdrdao``のようにファイルシステム層を経由せず光学ドライブへ直接
+    （SCSI/MMCコマンドで）アクセスするツールは、macOSがボリュームを
+    1つでもマウントしたままだと排他アクセスできず失敗する（実機で
+    確認済み。音楽CDは各トラックが個別の``CD_DA``ボリュームとして
+    マウントされるため、単一パーティションの``diskutil unmount``では
+    不十分で、ディスク全体を対象にする``unmountDisk``が必要）。
+
+    呼び出し前に必ずユーザーへ確認を取ること（GUI側の責務。AGENTS.md
+    の「ユーザーの許可なくディスクのアンマウント・イジェクトを自動実行
+    しない」を参照）。
+    """
+    whole_disk = _whole_disk_identifier(device_identifier)
+    result = subprocess.run(
+        ["diskutil", "unmountDisk", f"/dev/{whole_disk}"],
+        capture_output=True,
+        check=False,
+    )
+    return result.returncode == 0
+
+
+def mount_disk(device_identifier: str) -> bool:
+    """``unmount_disk`` で外したボリュームを再マウントする（ベストエフォート）。
+
+    失敗してもディスクの内容自体が失われるわけではないため、
+    呼び出し元は失敗時にエラーで処理全体を止める必要はない。
+    """
+    whole_disk = _whole_disk_identifier(device_identifier)
+    result = subprocess.run(
+        ["diskutil", "mountDisk", f"/dev/{whole_disk}"],
+        capture_output=True,
+        check=False,
+    )
+    return result.returncode == 0
 
 
 class MediaType(str, Enum):

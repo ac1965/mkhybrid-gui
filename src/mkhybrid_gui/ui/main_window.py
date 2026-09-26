@@ -45,7 +45,10 @@ from mkhybrid_gui.cdrdao import CdrdaoWorker
 from mkhybrid_gui.disk_utils import (
     MediaType,
     Volume,
+    get_media_name,
     list_volumes,
+    mount_disk,
+    unmount_disk,
     whole_disk_raw_device,
 )
 from mkhybrid_gui.iso_builder import IsoOptions, IsoWorker
@@ -91,6 +94,9 @@ class MainWindow(QMainWindow):
         self._metadata_lookup_worker: MetadataLookupWorker | None = None
         self._last_output_directory = ""
         self._drive_option_note_shown = False
+        #: cdrdao実行のためアンマウントしたディスクの識別子。
+        #: `_on_finished()`で再マウントするために保持する。
+        self._cdrdao_unmounted_device_identifier: str | None = None
 
         self._build_ui()
         self._apply_config(config.get_config())
@@ -588,9 +594,13 @@ class MainWindow(QMainWindow):
         cdrdaoモードは、トラックごとの変換・タグ付けを行わない
         ディスク全体のバックアップのため、正確なリッピング専用の
         ウィジェット（書き出し形式・厳密な検証・アーティスト名/年・
-        MusicBrainz検索・トラック名テーブル）を隠す。``album_edit``は
-        両モードで表示したままにする（cdrdaoモードでのTOC+BINファイル名
-        にも使うため）。
+        トラック名テーブル）を隠す。``album_edit``とMusicBrainz検索
+        関連のウィジェットは両モードで表示したままにする。
+        「オンラインで検索」はアルバム名（cdrdaoモードでのTOC+BIN
+        ファイル名にも使う）を手入力せずに取得する手段として、
+        cdrdaoモードでも引き続き有用なため（アーティスト名/年/
+        トラック名も一緒に取得されるが、cdrdaoモードでは単に使われ
+        ないだけで無害）。
         """
         volume: Volume | None = self.device_combo.currentData()
         is_audio = (
@@ -607,10 +617,10 @@ class MainWindow(QMainWindow):
         self.verify_checkbox.setVisible(accurate_visible)
         self.artist_edit.setVisible(accurate_visible)
         self.year_edit.setVisible(accurate_visible)
-        self.metadata_lookup_row_label.setVisible(accurate_visible)
-        self.metadata_lookup_button.setVisible(accurate_visible)
-        self.metadata_privacy_label.setVisible(accurate_visible)
-        self.metadata_status_label.setVisible(accurate_visible)
+        self.metadata_lookup_row_label.setVisible(is_audio)
+        self.metadata_lookup_button.setVisible(is_audio)
+        self.metadata_privacy_label.setVisible(is_audio)
+        self.metadata_status_label.setVisible(is_audio)
         self.track_title_table.setVisible(accurate_visible)
 
         if is_cdrdao:
@@ -1083,6 +1093,56 @@ class MainWindow(QMainWindow):
             if reply != QMessageBox.StandardButton.Yes:
                 return
 
+        # cdrdaoはファイルシステム層を経由せずSCSI/MMCコマンドで直接
+        # ドライブへアクセスするため、macOSがボリュームをマウントした
+        # ままだと排他アクセスできない（実機で確認済み）。ディスクの
+        # アンマウントはユーザーの許可なく自動実行しない
+        # （AGENTS.mdの既存方針）ため、ここで確認を挟む。
+        reply = QMessageBox.question(
+            self,
+            "確認",
+            "cdrdaoでディスクイメージを作成するには、いったんディスクを"
+            "アンマウントする必要があります（取り出しは行いません。"
+            "完了後に自動的に再マウントします）。続行しますか？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        media_name = get_media_name(volume.device_identifier)
+
+        if not media_name:
+            QMessageBox.critical(
+                self,
+                "失敗",
+                "ドライブの情報を取得できませんでした。",
+            )
+            return
+
+        if not unmount_disk(volume.device_identifier):
+            QMessageBox.critical(
+                self,
+                "失敗",
+                "ディスクのアンマウントに失敗しました。",
+            )
+            return
+
+        # cdrdaoはmacOSでは/dev/rdiskNではなく、cdrdao scanbusが返す
+        # IOKitレジストリパスを--deviceに要求する（実機で確認済み）。
+        # ドライブのモデル名（diskutilのMediaName）で対応するエントリを
+        # 特定する。
+        device = cdrdao.find_scsi_device(cdrdao.scan_bus(), media_name)
+
+        if device is None:
+            mount_disk(volume.device_identifier)
+            QMessageBox.critical(
+                self,
+                "失敗",
+                "cdrdaoが認識できるドライブを特定できませんでした。",
+            )
+            return
+
         self._is_audio_job = True
         self._cancel_requested = False
         self._drive_option_note_shown = False
@@ -1090,12 +1150,11 @@ class MainWindow(QMainWindow):
         # リッピングで使った TemporaryDirectory を _on_finished() が
         # 誤って二重クリーンアップしないよう、明示的に None へ戻す。
         self._audio_work_tmpdir = None
+        self._cdrdao_unmounted_device_identifier = volume.device_identifier
         self.log_view.clear()
         self.status_label.setText("ディスクイメージを作成しています…")
         self._start_progress_indicator()
         self._set_controls_enabled(False)
-
-        device = whole_disk_raw_device(volume.device_identifier)
 
         worker = CdrdaoWorker(device, dest_path, base_name, parent=self)
 
@@ -1230,3 +1289,10 @@ class MainWindow(QMainWindow):
         if self._is_audio_job and self._audio_work_tmpdir is not None:
             self._audio_work_tmpdir.cleanup()
             self._audio_work_tmpdir = None
+
+        if self._cdrdao_unmounted_device_identifier is not None:
+            # 失敗・中断時も含め、cdrdao実行前にアンマウントしたディスクは
+            # 必ず再マウントを試みる（ベストエフォート。失敗してもディスク
+            # の内容自体は失われないため、これ自体でエラー表示はしない）。
+            mount_disk(self._cdrdao_unmounted_device_identifier)
+            self._cdrdao_unmounted_device_identifier = None

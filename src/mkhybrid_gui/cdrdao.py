@@ -16,6 +16,18 @@
 再利用する（GUI起動時にログインシェルのPATHを常にマージする、という
 過去に回帰した実績のあるロジックを、このモジュールで再実装して
 重複させない）。
+
+``cd-paranoia``（マウントされたままの状態でも動作する）と異なり、
+``cdrdao``はファイルシステム層を経由せずSCSI/MMCコマンドで直接
+ドライブへアクセスするため、macOSがボリュームを1つでもマウントした
+ままだと排他アクセスに失敗する（実機で確認済み）。呼び出し側は
+``rip_disc_image()``を呼ぶ前に必ず``disk_utils.unmount_disk()``で
+ディスク全体をアンマウントし（ユーザーへの確認を挟むこと）、完了後に
+``disk_utils.mount_disk()``で再マウントすること。
+
+``--device``にはmacOSの``/dev/rdiskN``ではなく、``cdrdao scanbus``が
+返すIOKitレジストリパスを渡す必要がある（実機で確認済み。
+``find_scsi_device()``を参照）。
 """
 
 from __future__ import annotations
@@ -81,10 +93,70 @@ def _run_streaming(
     return CommandResult(returncode=returncode, output="".join(lines))
 
 
+#: IOKitのパス自体に``:``（``IOService:/...``の直後、前後に空白なし）や
+#: 空白（例: ``Mass Storage Device@...``）が含まれうるため、正規表現の
+#: 単純な区切りでは誤爆する。区切りは常に空白付きの`` : ``
+#: （パス側の``:``には前後に空白が無い）であることを利用し、文字列の
+#: ``rsplit``で区切る方が確実（実機の``cdrdao scanbus``出力で確認済み）。
+_SCANBUS_SEPARATOR = " : "
+
+
+def scan_bus() -> str:
+    """``cdrdao scanbus``の生出力（stdout+stderr結合）を返す。
+
+    ``cdrdao``はmacOSでは``/dev/rdiskN``ではなく、この出力に含まれる
+    IOKitレジストリパス（例:
+    ``IOService:/AppleARMPE/.../IODVDServices``）を``--device``に
+    渡す必要がある（実機で確認済み。``/dev/rdiskN``を渡すと
+    ``Cannot setup device``で失敗する）。
+    """
+    result = subprocess.run(
+        ["cdrdao", "scanbus"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=command_env(),
+    )
+    return result.stdout + result.stderr
+
+
+def find_scsi_device(scanbus_output: str, media_name: str) -> str | None:
+    """``scan_bus()``の出力から、``media_name``
+    （``disk_utils.get_media_name()``、例: ``"ASUS SDRW-08U9M-U"``）に
+    一致するドライブのIOKitパスを探す。
+
+    同一モデルのドライブが複数接続されている場合は区別できず、最初に
+    一致したものを返す（既知の制限）。
+    """
+    normalized_target = " ".join(media_name.split())
+
+    for line in scanbus_output.splitlines():
+        if _SCANBUS_SEPARATOR not in line:
+            continue
+
+        path, _, rest = line.partition(_SCANBUS_SEPARATOR)
+        fields = rest.split(",")
+
+        if len(fields) < 2:
+            continue
+
+        vendor, model = fields[0], fields[1]
+        candidate = f"{vendor.strip()} {model.strip()}"
+
+        if " ".join(candidate.split()) == normalized_target:
+            return path.strip()
+
+    return None
+
+
 def build_read_cd_command(
     device: str, toc_path: Path, bin_path: Path
 ) -> list[str]:
     """ディスク全体をTOC+BINイメージとして読み取る``cdrdao``コマンドを組み立てる。
+
+    ``device``は``/dev/rdiskN``ではなく、``find_scsi_device()``が返す
+    IOKitレジストリパスであること（実機で確認済み。詳細は
+    ``scan_bus()``のdocstringを参照）。
 
     ``--paranoia-mode 3``（フルパラノイア: ジッター補正・誤り訂正・
     セクタ単位の再読込を最大限有効にするモード）は必ず指定する。これは

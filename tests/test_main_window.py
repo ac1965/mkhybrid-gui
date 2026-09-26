@@ -204,7 +204,7 @@ def test_selecting_cdrdao_mode_hides_accurate_rip_widgets(
 ) -> None:
     """cdrdao（ディスクイメージ）モードでは、トラックごとの変換・タグ付けに
     関するウィジェットを隠すが、``album_edit``（TOC+BINのファイル名に
-    使う）は表示したままにする。
+    使う）と、それを埋めるためのMusicBrainz検索ボタンは表示したままにする。
     """
     monkeypatch.setattr(
         main_window_module,
@@ -223,7 +223,7 @@ def test_selecting_cdrdao_mode_hides_accurate_rip_widgets(
     assert window.year_edit.isVisible() is False
     assert window.track_title_table.isVisible() is False
     assert window.verify_checkbox.isVisible() is False
-    assert window.metadata_lookup_button.isVisible() is False
+    assert window.metadata_lookup_button.isVisible() is True
     for radio in window._audio_format_buttons.values():
         assert radio.isVisible() is False
     assert window.start_button.text() == "ディスクイメージを作成"
@@ -518,6 +518,23 @@ def test_start_cdrdao_rip_uses_album_name_for_base_filename(
     monkeypatch.setattr(
         main_window_module.cdrdao, "missing_tools", lambda: []
     )
+    monkeypatch.setattr(
+        main_window_module, "get_media_name", lambda device_id: "TEST DRIVE"
+    )
+    monkeypatch.setattr(
+        main_window_module, "unmount_disk", lambda device_id: True
+    )
+    monkeypatch.setattr(
+        main_window_module, "mount_disk", lambda device_id: True
+    )
+    monkeypatch.setattr(
+        main_window_module.cdrdao, "scan_bus", lambda: "fake scanbus output"
+    )
+    monkeypatch.setattr(
+        main_window_module.cdrdao,
+        "find_scsi_device",
+        lambda output, media_name: "IOService:/fake/path",
+    )
 
     captured: dict = {}
 
@@ -565,6 +582,23 @@ def test_start_cdrdao_rip_falls_back_to_volume_name_without_album(
     )
     monkeypatch.setattr(
         main_window_module.cdrdao, "missing_tools", lambda: []
+    )
+    monkeypatch.setattr(
+        main_window_module, "get_media_name", lambda device_id: "TEST DRIVE"
+    )
+    monkeypatch.setattr(
+        main_window_module, "unmount_disk", lambda device_id: True
+    )
+    monkeypatch.setattr(
+        main_window_module, "mount_disk", lambda device_id: True
+    )
+    monkeypatch.setattr(
+        main_window_module.cdrdao, "scan_bus", lambda: "fake scanbus output"
+    )
+    monkeypatch.setattr(
+        main_window_module.cdrdao,
+        "find_scsi_device",
+        lambda output, media_name: "IOService:/fake/path",
     )
 
     captured: dict = {}
@@ -636,6 +670,253 @@ def test_start_cdrdao_rip_asks_before_overwriting_existing_files(
 
     assert calls == [True]
     assert window._worker is None
+
+
+def test_start_cdrdao_rip_declines_unmount_confirmation(
+    qtbot,
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """アンマウント確認ダイアログで「いいえ」を選んだ場合、
+    アンマウント・ワーカー起動のいずれも行わない。
+    """
+    monkeypatch.setattr(
+        main_window_module,
+        "query_disc_toc",
+        lambda device: DiscToc(track_offsets=[0], leadout_offset=1000),
+    )
+    monkeypatch.setattr(
+        main_window_module.cdrdao, "missing_tools", lambda: []
+    )
+    monkeypatch.setattr(
+        main_window_module, "CdrdaoWorker", lambda *a, **k: None
+    )
+
+    unmount_calls: list = []
+    monkeypatch.setattr(
+        main_window_module,
+        "unmount_disk",
+        lambda device_id: unmount_calls.append(device_id) or True,
+    )
+
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *a, **k: QMessageBox.StandardButton.No,
+    )
+
+    window.show()
+    _select_volume(window, _audio_volume())
+    window.audio_mode_cdrdao_radio.setChecked(True)
+    window.output_edit.setText(str(tmp_path / "out"))
+
+    window._on_start_clicked()
+
+    assert unmount_calls == []
+    assert window._worker is None
+
+
+def test_start_cdrdao_rip_shows_error_when_media_name_unavailable(
+    qtbot,
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+    _no_modal_dialogs: list,
+    tmp_path: Path,
+) -> None:
+    """ドライブのモデル名（MediaName）が取得できない場合、
+    アンマウントを試みずにエラーを表示する。
+    """
+    monkeypatch.setattr(
+        main_window_module,
+        "query_disc_toc",
+        lambda device: DiscToc(track_offsets=[0], leadout_offset=1000),
+    )
+    monkeypatch.setattr(
+        main_window_module.cdrdao, "missing_tools", lambda: []
+    )
+    monkeypatch.setattr(
+        main_window_module, "get_media_name", lambda device_id: None
+    )
+
+    unmount_calls: list = []
+    monkeypatch.setattr(
+        main_window_module,
+        "unmount_disk",
+        lambda device_id: unmount_calls.append(device_id) or True,
+    )
+
+    window.show()
+    _select_volume(window, _audio_volume())
+    window.audio_mode_cdrdao_radio.setChecked(True)
+    window.output_edit.setText(str(tmp_path / "out"))
+
+    window._on_start_clicked()
+
+    assert unmount_calls == []
+    assert window._worker is None
+    assert any(name == "critical" for name, _, _ in _no_modal_dialogs)
+
+
+def test_start_cdrdao_rip_shows_error_when_unmount_fails(
+    qtbot,
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+    _no_modal_dialogs: list,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        main_window_module,
+        "query_disc_toc",
+        lambda device: DiscToc(track_offsets=[0], leadout_offset=1000),
+    )
+    monkeypatch.setattr(
+        main_window_module.cdrdao, "missing_tools", lambda: []
+    )
+    monkeypatch.setattr(
+        main_window_module, "get_media_name", lambda device_id: "TEST DRIVE"
+    )
+    monkeypatch.setattr(
+        main_window_module, "unmount_disk", lambda device_id: False
+    )
+    monkeypatch.setattr(
+        main_window_module, "CdrdaoWorker", lambda *a, **k: None
+    )
+
+    window.show()
+    _select_volume(window, _audio_volume())
+    window.audio_mode_cdrdao_radio.setChecked(True)
+    window.output_edit.setText(str(tmp_path / "out"))
+
+    window._on_start_clicked()
+
+    assert window._worker is None
+    assert any(name == "critical" for name, _, _ in _no_modal_dialogs)
+
+
+def test_start_cdrdao_rip_remounts_when_device_not_found(
+    qtbot,
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+    _no_modal_dialogs: list,
+    tmp_path: Path,
+) -> None:
+    """cdrdao scanbusの出力からドライブを特定できない場合、
+    アンマウント済みのディスクを再マウントしたうえでエラーを表示する。
+    """
+    monkeypatch.setattr(
+        main_window_module,
+        "query_disc_toc",
+        lambda device: DiscToc(track_offsets=[0], leadout_offset=1000),
+    )
+    monkeypatch.setattr(
+        main_window_module.cdrdao, "missing_tools", lambda: []
+    )
+    monkeypatch.setattr(
+        main_window_module, "get_media_name", lambda device_id: "TEST DRIVE"
+    )
+    monkeypatch.setattr(
+        main_window_module, "unmount_disk", lambda device_id: True
+    )
+    monkeypatch.setattr(
+        main_window_module.cdrdao, "scan_bus", lambda: "no matching device"
+    )
+    monkeypatch.setattr(
+        main_window_module.cdrdao,
+        "find_scsi_device",
+        lambda output, media_name: None,
+    )
+
+    mount_calls: list = []
+    monkeypatch.setattr(
+        main_window_module,
+        "mount_disk",
+        lambda device_id: mount_calls.append(device_id) or True,
+    )
+    monkeypatch.setattr(
+        main_window_module, "CdrdaoWorker", lambda *a, **k: None
+    )
+
+    window.show()
+    _select_volume(window, _audio_volume())
+    window.audio_mode_cdrdao_radio.setChecked(True)
+    window.output_edit.setText(str(tmp_path / "out"))
+
+    window._on_start_clicked()
+
+    assert mount_calls == ["disk5"]  # _audio_volume()のdevice_identifier
+    assert window._worker is None
+    assert any(name == "critical" for name, _, _ in _no_modal_dialogs)
+
+
+def test_on_finished_remounts_disk_after_cdrdao_job(
+    qtbot,
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+    _no_modal_dialogs: list,
+    tmp_path: Path,
+) -> None:
+    """cdrdaoジョブの完了時、開始時にアンマウントしたディスクを
+    再マウントする（成功・失敗を問わず）。
+    """
+    monkeypatch.setattr(
+        main_window_module,
+        "query_disc_toc",
+        lambda device: DiscToc(track_offsets=[0], leadout_offset=1000),
+    )
+    monkeypatch.setattr(
+        main_window_module.cdrdao, "missing_tools", lambda: []
+    )
+    monkeypatch.setattr(
+        main_window_module, "get_media_name", lambda device_id: "TEST DRIVE"
+    )
+    monkeypatch.setattr(
+        main_window_module, "unmount_disk", lambda device_id: True
+    )
+    monkeypatch.setattr(
+        main_window_module.cdrdao, "scan_bus", lambda: "fake scanbus output"
+    )
+    monkeypatch.setattr(
+        main_window_module.cdrdao,
+        "find_scsi_device",
+        lambda output, media_name: "IOService:/fake/path",
+    )
+
+    mount_calls: list = []
+    monkeypatch.setattr(
+        main_window_module,
+        "mount_disk",
+        lambda device_id: mount_calls.append(device_id) or True,
+    )
+
+    class _FakeCdrdaoWorker:
+        def __init__(self, device, destination_dir, base_name, parent=None):
+            self.progress = _FakeSignal()
+            self.finished_ok = _FakeSignal()
+
+        def isRunning(self) -> bool:  # noqa: N802 - Qtの命名規則に合わせる
+            return False
+
+        def start(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        main_window_module, "CdrdaoWorker", _FakeCdrdaoWorker
+    )
+
+    window.show()
+    _select_volume(window, _audio_volume())
+    window.audio_mode_cdrdao_radio.setChecked(True)
+    window.output_edit.setText(str(tmp_path / "out"))
+
+    window._on_start_clicked()
+
+    assert mount_calls == []  # まだ実行中なので再マウントしない
+
+    window._on_finished(True, "ディスクイメージを作成しました。")
+
+    assert mount_calls == ["disk5"]  # _audio_volume()のdevice_identifier
+    assert window._cdrdao_unmounted_device_identifier is None
 
 
 class _FakeSignal:

@@ -14,8 +14,20 @@ import pytest
 from mkhybrid_gui import audio_cd, cdrdao
 from mkhybrid_gui.cdrdao import (
     build_read_cd_command,
+    find_scsi_device,
     missing_tools,
     rip_disc_image,
+)
+
+# 実機（ASUS SDRW-08U9M-U、USB接続）の ``cdrdao scanbus`` 実行結果。
+SAMPLE_SCANBUS_OUTPUT = (
+    "IOService:/AppleARMPE/arm-io@10F00000/AppleH16GFamilyIO/"
+    "usb-drd3@1A280000/AppleT8132USBXHCI@03000000/"
+    "usb-drd3-port-hs@03100000/Mass Storage Device@03100000/"
+    "6238--Storage@0/IOUSBMassStorageInterfaceNub/"
+    "IOUSBMassStorageDriverNub/IOUSBMassStorageDriver/"
+    "IOSCSILogicalUnitNub@0/IOSCSIPeripheralDeviceType05/"
+    "IODVDServices : ASUS, SDRW-08U9M-U, A114\n"
 )
 
 # --- コマンド組み立て ---------------------------------------------------
@@ -54,6 +66,57 @@ def test_build_read_cd_command_always_uses_full_paranoia_mode() -> None:
 
     assert "--paranoia-mode" in cmd
     assert cmd[cmd.index("--paranoia-mode") + 1] == "3"
+
+
+def test_scan_bus_combines_stdout_and_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(cmd, **kwargs):
+        assert cmd == ["cdrdao", "scanbus"]
+
+        class FakeCompletedProcess:
+            stdout = "line-from-stdout\n"
+            stderr = "line-from-stderr\n"
+
+        return FakeCompletedProcess()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        audio_cd, "effective_path", lambda: "/opt/homebrew/bin:/usr/bin:/bin"
+    )
+
+    output = cdrdao.scan_bus()
+
+    assert "line-from-stdout" in output
+    assert "line-from-stderr" in output
+
+
+# --- scanbusによるデバイス解決 --------------------------------------------
+
+
+def test_find_scsi_device_matches_media_name() -> None:
+    """実機の``cdrdao scanbus``出力から、diskutilの``MediaName``に
+    一致するドライブのIOKitパスを見つけられることを確認する。
+    """
+    device = find_scsi_device(SAMPLE_SCANBUS_OUTPUT, "ASUS SDRW-08U9M-U")
+
+    assert device == (
+        "IOService:/AppleARMPE/arm-io@10F00000/AppleH16GFamilyIO/"
+        "usb-drd3@1A280000/AppleT8132USBXHCI@03000000/"
+        "usb-drd3-port-hs@03100000/Mass Storage Device@03100000/"
+        "6238--Storage@0/IOUSBMassStorageInterfaceNub/"
+        "IOUSBMassStorageDriverNub/IOUSBMassStorageDriver/"
+        "IOSCSILogicalUnitNub@0/IOSCSIPeripheralDeviceType05/"
+        "IODVDServices"
+    )
+
+
+def test_find_scsi_device_returns_none_when_no_match() -> None:
+    assert find_scsi_device(SAMPLE_SCANBUS_OUTPUT, "Some Other Drive") is None
+
+
+def test_find_scsi_device_returns_none_for_empty_output() -> None:
+    assert find_scsi_device("", "ASUS SDRW-08U9M-U") is None
 
 
 # --- 外部ツールの有無チェック --------------------------------------------
