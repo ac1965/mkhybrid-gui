@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
+
+# pytest-qt がQApplicationを生成する前に設定する必要があるため、
+# モジュールの読み込み時点（他のimportより前）でオフスクリーン実行を
+# 強制する。CI等、実ディスプレイのない環境でもGUIテストを実行できる
+# ようにするため。既にQT_QPA_PLATFORMが設定されている場合は尊重する。
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from mkhybrid_gui import config
 

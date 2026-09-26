@@ -84,6 +84,13 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._refresh_volumes()
 
+        # マウント済みのドライブが1つも無い場合、_refresh_volumes()が
+        # device_comboに何も追加せず currentIndexChanged が一度も発火
+        # しないため、_on_device_changed() が呼ばれないまま各ウィジェットが
+        # 構築時の既定の表示状態（音楽CD用の項目も含めて可視）になって
+        # しまう。明示的に一度呼び、実際の選択状態と表示を確実に一致させる。
+        self._on_device_changed(self.device_combo.currentIndex())
+
     # -- UI構築 -----------------------------------------------------
 
     def _build_ui(self) -> None:

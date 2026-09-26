@@ -150,7 +150,7 @@ make distclean  # clean に加えて .venv も削除
 - `audio_cd.py` は実際の音楽CD・cd-paranoia/afconvert/flacバイナリを使わず、`subprocess.run`/`subprocess.Popen` をモック化してトラック数解析・コマンド組み立て・検証ロジック（複数回読み取りの一致判定）・変換処理を検証する。ただし `write_metadata_tags`（`mutagen`）は外部バイナリに依存しない純Pythonのため、モックせず実際に妥当なフォーマットの最小限のファイル（`wave`標準モジュールやバイト列を直接組み立てて生成、Homebrew依存の`flac`バイナリや非推奨の`aifc`モジュールは使わない）を用意してタグの読み書きをテストする。
 - `metadata.py` の `compute_disc_id` は、実際にMusicBrainz APIへ問い合わせて確認した実データ（disc id・offsets・sectors）をテストベクタとして使う（当てずっぽうの値やlibdiscid由来の値を使わない）。
 - `musicbrainz.py` は実ネットワークを使わず、`url_opener` を差し替えたフェイクレスポンスで正常系（0/1/複数件）・HTTPエラー・タイムアウト・不正JSONを検証する。
-- GUI部分のテストには `pytest-qt`（`qtbot`）を用いる（現状 `pyproject.toml` の `dev` extrasには含めているが、`main_window.py` に対する実際のテストは未整備。README.md の「ロードマップ・既知の制限」で追跡している）。
+- GUI部分のテストには `pytest-qt`（`qtbot`）を用いる（[tests/test_main_window.py](tests/test_main_window.py)）。`IsoWorker`/`AudioRipWorker`/`MetadataLookupWorker`は実際に起動せず、`list_volumes`/`query_disc_toc`/`missing_tools`等の呼び出し境界をモック化し、ウィジェットの表示切り替え・入力検証・状態管理のロジックのみを検証する。`QMessageBox`はモーダルダイアログのためstaticメソッドを差し替え、テストがブロックされないようにする。ワーカースレッドを実際に起動して完了まで待つ結合テストは対象外（README.md の「ロードマップ・既知の制限」で追跡している）。
 - 実機（実CD-ROM/DVD/BD/音楽CD）を使った結合テストはCI対象外とし、手動確認手順をREADMEに記載する。
 
 ## やってはいけないこと
@@ -170,6 +170,7 @@ make distclean  # clean に加えて .venv も削除
 - MusicBrainzへの問い合わせ（`musicbrainz.lookup_releases`）を、ユーザーの明示的なボタン操作なしに自動実行しない（デバイス選択時やアプリ起動時に暗黙で通信を発生させない）。
 - MusicBrainz APIのレート制限（1秒1リクエスト）を無視して連続で問い合わせない。IPアドレスがブロックされるリスクがある。`musicbrainz._wait_for_rate_limit` を経由しないネットワーク呼び出しを追加しない。
 - `metadata.compute_disc_id()` の実装を、実データで検証した仕様（オフセットは生LBAに `LEAD_IN_FRAMES`(150)を加算したフレーム値、SHA-1 + Base64の`+/=`を`._-`に置換）から離れた形に変更しない。1文字でもズレると生成されるDisc IDが全く別物になり、無音で「見つかりません」という結果になる（検出しにくいバグになるため要注意）。
+- `MainWindow.__init__()` から `self._on_device_changed(self.device_combo.currentIndex())` の明示呼び出しを削除しない。マウント済みドライブが1つも無い場合（`list_volumes()`が空リストを返す場合）、`device_combo`は空のままで`currentIndexChanged`シグナルが一度も発火しないため、この明示呼び出しが無いと音楽CD用のメタデータ入力欄（アルバム名/アーティスト名/トラック名テーブル等）が、何も選択されていないのに表示されたままになる回帰になる（`tests/test_main_window.py`の`test_metadata_widgets_hidden_by_default`で検出・修正済み）。
 
 ## コミット/PR規約
 
