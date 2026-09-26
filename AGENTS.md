@@ -105,7 +105,7 @@ make distclean  # clean に加えて .venv も削除
 
 ## 主要な実装要件（機能仕様）
 
-1. **デバイス/ドライブ選択**: `diskutil list` の結果からマウント済みボリュームの一覧をGUI上に表示し、ユーザーに選択させる。各ボリュームは `diskutil info -plist` の `FilesystemType` とサイズから `MediaType`（データCD/音楽CD/DVD/BD）を推定し、選択肢のラベルに表示する（`disk_utils.detect_media_type`）。
+1. **デバイス/ドライブ選択**: `diskutil list` の結果からマウント済みボリュームの一覧をGUI上に表示し、ユーザーに選択させる。各ボリュームは `diskutil info -plist` の `FilesystemType` とサイズから `MediaType`（データCD/音楽CD/DVD/BD）を推定し、選択肢のラベルに表示する（`disk_utils.detect_media_type`）。`filesystem_type` が既知の非光学ファイルシステム（`apfs`等）と判明している場合は `MediaType` を付与せず、`disk_utils.list_volumes()` はそのようなボリューム（内蔵の起動ディスク等）をGUIの選択肢から除外すること。
 2. **イメージ作成（データCD/DVD/BD）**: 選択対象に対して以下を実行する。
    ```
    hdiutil makehybrid -iso [-joliet] [-udf] -o <出力先.iso> <デバイスorマウントポイント>
@@ -122,7 +122,11 @@ make distclean  # clean に加えて .venv も削除
 4. **進捗表示**: `IsoWorker` / `AudioRipWorker`（いずれも `QThread`）で非同期実行し、`progress` シグナルでメインスレッドのUIを更新する。処理中はGUIをブロックしないこと。
    - `hdiutil makehybrid` は実際には進捗率を出力しないため、ISO作成フェーズの進捗バーは不確定（ビジー）表示のままにし、検証フェーズ開始・完了時のみ確定値（90%/100%）へ切り替える（実進捗率が得られたと偽装しない）。
    - 音楽CDのリッピングは、トラック単位（現在のトラック番号／総トラック数）の粗い進捗率を `progress_percent` シグナルで通知する。
-5. **検証（ISO）**: ISOイメージ作成後に `hdiutil verify <出力先.iso>` を自動実行し、結果をGUIに表示する。検証中の出力も（完了を待たず）その場でGUIへストリーミング表示すること（`subprocess.run` で完了まで待ってからまとめて表示する実装に戻さない）。
+5. **検証（ISO）**: ISOイメージ作成後、`iso_builder.verify_iso()` が以下の手順で検証する（**`hdiutil verify` は使用しない**）。検証中の出力も（完了を待たず）その場でGUIへストリーミング表示すること（`subprocess.run` で完了まで待ってからまとめて表示する実装に戻さない）。
+   - **`hdiutil verify` を使わない理由（実機確認済み）**: `hdiutil makehybrid` が生成するISOイメージにはチェックサムが一切含まれない（`hdiutil imageinfo` で `Checksummed: false` / `Checksum Type: なし` を確認済み）。そのため `hdiutil verify` は、内容が正しい正常なISOイメージに対しても**必ず** `"has no checksum"` で失敗する。
+   - 代わりに、`hdiutil attach -readonly` でイメージを実際にattachし、マウントされたファイルシステムが `udf` の場合のみ `diskutil verifyVolume`（内部的に `fsck_udf` を使用）でファイルシステムの整合性を検証する。意図的にtruncateした壊れたISOに対して `Bad extent in file` / `Filesystem is dirty` を正しく検出できることを実機で確認済み。
+   - UDFを含まない（ISO9660/Jolietのみの）イメージについては、macOS側に対応するファイルシステム検証ツールが存在せず、`diskutil verifyVolume` は常に `"Invalid request (-69886)"` で失敗する（実機確認済み）。この場合はattachできたことのみをもって検証成功とみなす（深いファイルシステム検証は行えない、既知の制限としてREADMEに記載）。
+   - 検証後は成功・失敗によらず必ず `hdiutil detach` でデタッチする。
 6. **エラーハンドリング**: コピーガード付きメディア等でセクタ単位読み取りが必要なケースを検出できない場合は、明確なエラーメッセージを表示し、対処法（別ツールの利用など）を案内する。
 7. **安全な中断**: 実行中のISO作成・音楽CDリッピングは、GUI上の「中断」ボタンから中断できること。中断時は実行中の外部コマンドへ `terminate`（SIGTERM）を送り、作成途中の一時ファイル（WAV・部分的なISO等）を削除してから完了通知を出す（`IsoWorker.request_cancel` / `AudioRipWorker.request_cancel`、`audio_cd.RipCancelled`）。また、処理中はウィンドウを閉じられないようにし（`MainWindow.closeEvent`）、実行中のバックグラウンドスレッドを残したままアプリが終了しないようにすること。
 
@@ -145,9 +149,24 @@ make distclean  # clean に加えて .venv も削除
 - `cd-paranoia`/`flac` が見つからない場合に、フォーマット変換をサイレントにスキップしたり、CDDAFSコピー等の低精度な代替手段に自動フォールバックしたりしない。GUI上で明確にエラー表示し、`brew install` を案内すること。
 - `audio_cd._effective_path()` を「`PATH`が空の場合だけログインシェルを問い合わせる」実装に戻さない。GUI起動時も`PATH`は非空（launchdの最小値）になるため、その条件では常にHomebrewのコマンドが見つからなくなる。
 - `iso_builder.verify_iso()` を `subprocess.run`（完了を待ってから出力をまとめて渡す方式）に戻さない。検証中のGUI進捗表示が完了までフリーズしたように見える回帰になる。
+- `iso_builder.verify_iso()` を `hdiutil verify` ベースの実装に戻さない。`hdiutil makehybrid` が生成するイメージにはチェックサムが一切含まれないため（実機確認済み）、`hdiutil verify` は正常なISOイメージに対しても必ず失敗し、ISO作成が実際には成功しているのに毎回「失敗」と誤報告する重大な回帰になる。
 - 実行中のワーカースレッド（`IsoWorker`/`AudioRipWorker`）を残したままウィンドウを閉じられるようにしない（`MainWindow.closeEvent` のガードを外さない）。
+- `disk_utils.detect_media_type()` を、`filesystem_type` が既知の非光学ファイルシステム（`apfs`/`hfs+`/`exfat` 等）と判明している場合にもサイズだけでCD/DVD/BDと判定するように戻さない。サイズベースの推定フォールバックは `filesystem_type is None`（＝真に判別材料がない場合）に限ること。これを怠ると、内蔵の起動ディスク（Macintosh HD等）がGUIのドライブ選択肢に「Blu-ray」「データCD」等として表示され、誤って選択できてしまう（実機のMacで実際に再現・修正済みの回帰）。
 
 ## コミット/PR規約
 
 - コミットメッセージは日本語または英語のいずれかで統一し、変更内容が分かる粒度で分割する。
 - GUI変更を伴うPRには、変更前後のスクリーンショットを添付する。
+
+## AIコーディングエージェントの作業方針（確認の省略可否）
+
+- 破壊的操作・当初の依頼範囲を超えるスコープ拡大・安全ガードレールへの
+  抵触のいずれにも当たらない限り、都度ユーザーに確認を取らずに作業を
+  進めてよい（テスト実行、依存関係のインストール、依頼範囲内のファイル
+  読み書き、実機・実デバイスに対する読み取り専用の確認コマンド実行等）。
+- 一方で、`git push --force`（force-push）、`git commit --amend`、
+  `--no-verify`（フックのスキップ）等、force-push/--amend/--no-verifyに
+  類する操作や、その他ユーザー自身の明示的な指示を要求する操作について
+  は、このプロジェクトでも例外なく毎回確認を取ること。これは既存の
+  Git安全プロトコル（破壊的操作の確認、フックのスキップ禁止等）を
+  緩和するものではない。

@@ -368,7 +368,9 @@ def test_list_volumes_does_not_duplicate_existing_volume(
         for volume in volumes
     ]
 
-    assert device_ids.count("disk0s1") == 1
+    # disk0s1（apfs、内蔵ボリューム）は光学メディアではないため、
+    # list_volumes()の結果には含まれない。
+    assert "disk0s1" not in device_ids
     assert device_ids.count("disk2s0") == 1
 
 
@@ -460,6 +462,71 @@ def test_detect_media_type_unknown_filesystem_falls_back_to_size() -> None:
         )
         == MediaType.BD
     )
+
+
+def test_detect_media_type_known_non_optical_filesystem_returns_none() -> None:
+    """apfs/hfs+/exfat等、光学メディアでは使われないファイルシステムが
+    判明している場合は、サイズによらず光学メディアとして扱わない
+    （``None`` を返す）ことを確認する。
+
+    実機で確認された回帰: 500GBの内蔵APFS起動ボリューム
+    （Macintosh HD）が、サイズだけで「Blu-ray」に誤分類され、
+    GUIのドライブ選択肢に表示されてしまっていた。
+    """
+    assert (
+        detect_media_type(
+            _volume(500_000_000_000),
+            "apfs",
+        )
+        is None
+    )
+
+    assert (
+        detect_media_type(
+            _volume(500_000),
+            "hfs+",
+        )
+        is None
+    )
+
+    assert (
+        detect_media_type(
+            _volume(32_000_000_000),
+            "exfat",
+        )
+        is None
+    )
+
+
+def test_list_volumes_excludes_internal_apfs_volumes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """内蔵APFS起動ボリュームが光学メディアの選択肢に紛れ込まないことを
+    確認する（実機のディスク構成を模した回帰テスト）。
+    """
+    data = SAMPLE_DISKUTIL_LIST | {
+        "AllDisksAndPartitions": [
+            *SAMPLE_DISKUTIL_LIST["AllDisksAndPartitions"],
+        ],
+    }
+
+    monkeypatch.setattr(
+        "mkhybrid_gui.disk_utils.subprocess.run",
+        _fake_diskutil_run(
+            data,
+            {
+                "disk0s1": "apfs",
+                "disk2s0": "cd9660",
+            },
+        ),
+    )
+
+    volumes = list_volumes(mounted_only=True)
+    device_ids = {volume.device_identifier for volume in volumes}
+
+    assert "disk0s1" not in device_ids
+    assert "disk2s0" in device_ids
+    assert all(volume.media_type is not None for volume in volumes)
 
 
 def test_list_volumes_raises_on_nonzero_returncode(

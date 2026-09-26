@@ -1,4 +1,4 @@
-"""``hdiutil makehybrid`` / ``hdiutil verify`` のラッパー。
+"""``hdiutil makehybrid`` / 検証(attach + ``diskutil verifyVolume``) のラッパー。
 
 コマンド組み立てと実行のロジックはUIフレームワークに依存しない関数として実装し、
 GUIからの非同期実行のみ ``IsoWorker``（QThread）が担う。
@@ -6,6 +6,7 @@ GUIからの非同期実行のみ ``IsoWorker``（QThread）が担う。
 
 from __future__ import annotations
 
+import plistlib
 import re
 import subprocess
 from collections.abc import Callable
@@ -94,13 +95,61 @@ def build_makehybrid_command(
     ]
 
 
-def build_verify_command(image_path: str | Path) -> list[str]:
-    """``hdiutil verify`` のコマンド引数リストを組み立てる。"""
+def build_attach_command(image_path: str | Path) -> list[str]:
+    """検証のためにイメージを読み取り専用でattach（マウント）するコマンド。"""
     return [
         "hdiutil",
-        "verify",
+        "attach",
+        "-readonly",
         str(image_path),
     ]
+
+
+def build_verify_volume_command(device: str) -> list[str]:
+    """attach済みデバイスのファイルシステム整合性を検証するコマンド。"""
+    return ["diskutil", "verifyVolume", device]
+
+
+def build_detach_command(device: str) -> list[str]:
+    """検証のためにattachしたデバイスを取り外すコマンド。"""
+    return ["hdiutil", "detach", device]
+
+
+def _extract_attached_device(output: str) -> str | None:
+    """``hdiutil attach`` の出力からアタッチされたデバイスパスを取り出す。
+
+    典型的な出力は ``/dev/disk5          <tab...>  /Volumes/Foo`` の
+    ような1行（``-nomount`` 時はマウントポイント欄が空）。
+    """
+    for line in output.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("/dev/disk"):
+            return stripped.split()[0]
+
+    return None
+
+
+def _device_filesystem_type(device: str) -> str | None:
+    """``diskutil info -plist`` からアタッチ済みデバイスのFilesystemTypeを取得する。"""
+    result = subprocess.run(
+        ["diskutil", "info", "-plist", device],
+        capture_output=True,
+        check=False,
+    )
+
+    if result.returncode != 0:
+        return None
+
+    try:
+        info = plistlib.loads(result.stdout)
+    except Exception:  # noqa: BLE001
+        return None
+
+    if not isinstance(info, dict):
+        return None
+
+    filesystem_type = info.get("FilesystemType")
+    return filesystem_type if isinstance(filesystem_type, str) else None
 
 
 def run_makehybrid(
@@ -137,26 +186,85 @@ def verify_iso(
     on_percent: ProgressPercentCallback | None = None,
     on_process_started: ProcessStartedCallback | None = None,
 ) -> CommandResult:
-    """作成済みイメージを ``hdiutil verify`` で検証する。
+    """作成済みイメージのファイルシステムが健全かどうかを検証する。
 
-    ``run_makehybrid`` と同様にストリーミング実行する。以前は
-    ``subprocess.run`` で完了を待ってから出力をまとめて ``on_progress``
-    に渡していたため、検証中（大容量BDでは数分かかりうる）にGUIへ
-    一切の進捗が反映されないという問題があった。
+    以前は ``hdiutil verify`` を使用していたが、実機検証の結果、
+    ``hdiutil makehybrid`` が生成するイメージにはチェックサムが一切
+    含まれないため（``hdiutil imageinfo`` で ``Checksummed: false``
+    ``Checksum Type: なし`` を確認済み）、``hdiutil verify`` は
+    あらゆる正常なISOイメージに対しても必ず
+    ``"has no checksum"`` で失敗する（＝この機能は実質的に常に
+    「失敗」を報告していた）ことが判明した。
+
+    そのため、次の手順に置き換える。
+    1. ``hdiutil attach -readonly`` でイメージを実際にattach（マウント）
+       できるか確認する。
+    2. マウントされたファイルシステムが ``udf`` の場合のみ、
+       ``diskutil verifyVolume``（内部的に ``fsck_udf``）で
+       ファイルシステムの整合性を検証する。実機で、意図的に
+       truncateした壊れたイメージに対して ``Bad extent in file`` /
+       ``Filesystem is dirty`` を正しく検出できることを確認済み。
+    3. UDFを含まない（ISO9660/Jolietのみの）イメージについては、
+       macOS側に対応するファイルシステム検証ツールが存在せず
+       ``diskutil verifyVolume`` は常に ``"Invalid request"`` で
+       失敗する（実機確認済み）。この場合はattachできたことのみを
+       もって検証成功とみなす。
+    4. 検証後は必ずdetachする。
     """
-    cmd = build_verify_command(image_path)
-
-    result = _run_streaming(
-        cmd,
+    attach_result = _run_streaming(
+        build_attach_command(image_path),
         on_progress=on_progress,
-        on_percent=on_percent,
         on_process_started=on_process_started,
     )
 
-    if on_percent is not None and result.ok:
+    if not attach_result.ok:
+        return CommandResult(
+            returncode=attach_result.returncode,
+            stderr=(
+                "イメージをアタッチできませんでした: "
+                f"{attach_result.stderr}"
+            ),
+        )
+
+    device = _extract_attached_device(attach_result.stderr)
+
+    if device is None:
+        return CommandResult(
+            returncode=1,
+            stderr=(
+                "アタッチされたデバイスを特定できませんでした: "
+                f"{attach_result.stderr}"
+            ),
+        )
+
+    try:
+        filesystem_type = _device_filesystem_type(device)
+
+        if filesystem_type == "udf":
+            verify_result = _run_streaming(
+                build_verify_volume_command(device),
+                on_progress=on_progress,
+                on_process_started=on_process_started,
+            )
+        else:
+            if on_progress is not None:
+                on_progress(
+                    "ISO9660/Jolietのみのイメージのため、詳細な"
+                    "ファイルシステム検証には対応していません"
+                    "（アタッチ確認のみ実施しました）。"
+                )
+
+            verify_result = CommandResult(returncode=0, stderr="")
+    finally:
+        _run_streaming(
+            build_detach_command(device),
+            on_progress=on_progress,
+        )
+
+    if on_percent is not None and verify_result.ok:
         on_percent(100)
 
-    return result
+    return verify_result
 
 
 def _run_streaming(

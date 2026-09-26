@@ -50,13 +50,35 @@ _CD_MAX_BYTES = 1_000_000_000
 _DVD_MAX_BYTES = 10_000_000_000
 
 
-def detect_media_type(volume: Volume, filesystem_type: str | None) -> MediaType:
+def detect_media_type(
+    volume: Volume, filesystem_type: str | None
+) -> MediaType | None:
     """ボリュームのファイルシステム種別・サイズからメディア種別を推定する。
 
     BDXL・M-DISCは、OSからは通常のBD-R/BD-REと同じファイルシステムで
     マウントされるため、容量ベースでBlu-rayとして分類する。
+
+    返り値が ``None`` の場合、そのボリュームは光学メディアとして
+    扱うべきでないことを示す（例: 内蔵APFSボリューム）。
+    ``apfs``/``hfs+``/``exfat`` 等、光学メディアでは使われない
+    ファイルシステムが判明している場合にサイズだけで
+    CD/DVD/BDと誤判定すると、内蔵起動ディスク等がGUIの
+    ドライブ選択肢に「Blu-ray」等として表示されてしまう
+    （実機で確認された回帰）。サイズベースの推定フォールバックは、
+    ``filesystem_type`` が ``None``（＝ ``diskutil info`` 自体が
+    失敗し、光学メディアかどうか判別する材料がない）の場合に限る。
     """
-    fs = (filesystem_type or "").lower()
+    if filesystem_type is None:
+        # ファイルシステム情報が取得できない場合はサイズから推定する。
+        if volume.size <= _CD_MAX_BYTES:
+            return MediaType.CD_DATA
+
+        if volume.size <= _DVD_MAX_BYTES:
+            return MediaType.DVD
+
+        return MediaType.BD
+
+    fs = filesystem_type.lower()
 
     if fs == "cddafs":
         return MediaType.CD_AUDIO
@@ -75,14 +97,9 @@ def detect_media_type(volume: Volume, filesystem_type: str | None) -> MediaType:
             else MediaType.BD
         )
 
-    # ファイルシステム情報が取得できない場合はサイズから推定する。
-    if volume.size <= _CD_MAX_BYTES:
-        return MediaType.CD_DATA
-
-    if volume.size <= _DVD_MAX_BYTES:
-        return MediaType.DVD
-
-    return MediaType.BD
+    # cd9660/cddafs/udf以外の既知のファイルシステム
+    # （apfs、hfs+、exfat等）は光学メディアではない。
+    return None
 
 
 @dataclass(frozen=True)
@@ -354,7 +371,14 @@ def list_volumes(*, mounted_only: bool = True) -> list[Volume]:
     if mounted_only:
         volumes = [volume for volume in volumes if volume.is_mounted]
 
-    return [_with_media_type(volume) for volume in volumes]
+    classified = [_with_media_type(volume) for volume in volumes]
+
+    # 光学メディアと判定できなかったボリューム（内蔵APFSボリューム等）は
+    # GUIのドライブ選択肢から除外する。これを怠ると、内蔵の起動ディスク
+    # 等が「データCD」「Blu-ray」として選択可能になってしまう。
+    return [
+        volume for volume in classified if volume.media_type is not None
+    ]
 
 
 def _with_media_type(volume: Volume) -> Volume:
