@@ -5,6 +5,7 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
+from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -153,6 +154,23 @@ class MainWindow(QMainWindow):
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         root_layout.addWidget(self.log_view, stretch=1)
+
+    def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qtのオーバーライド
+        """処理中のワーカースレッドを残したままウィンドウが閉じられるのを防ぐ。
+
+        実行中に閉じると、バックグラウンドの ``QThread`` が動いたままアプリが
+        終了し、Qtの異常終了や書き出し途中のファイルの破損につながるため。
+        """
+        if self._worker is not None and self._worker.isRunning():
+            QMessageBox.warning(
+                self,
+                "処理を実行中です",
+                "ISOイメージの作成/オーディオの書き出しが完了するまでお待ちください。",
+            )
+            event.ignore()
+            return
+
+        super().closeEvent(event)
 
     # -- ドライブ一覧 -------------------------------------------------
 
