@@ -735,11 +735,19 @@ class MainWindow(QMainWindow):
             udf=self.udf_checkbox.isChecked(),
         )
 
-        if not (options.joliet or options.rock or options.udf):
+        # Rock Ridgeはこの判定に含めない。`options.rock` は
+        # 実際のhdiutilコマンドには一切影響しない（`-iso`指定時に
+        # 自動的に有効になり、`-rock`という形で明示的に渡すことは
+        # できない）ため、Rock Ridgeだけを有効にした状態と全項目を
+        # 無効にした状態とで、生成されるISOイメージの中身が完全に
+        # 同一になってしまう。それにもかかわらずRock Ridgeを含めて
+        # 判定すると、後者だけがエラーになるという一貫性のない挙動に
+        # なる（実機での報告により発見）。
+        if not (options.joliet or options.udf):
             QMessageBox.warning(
                 self,
                 "オプションエラー",
-                "Joliet / Rock Ridge / UDF のいずれかは有効にしてください。",
+                "Joliet / UDF のいずれかは有効にしてください。",
             )
             return
 

@@ -120,6 +120,7 @@ make distclean  # clean に加えて .venv も削除
    ```
    - GUI上の「Rock Ridge」チェックボックスはデフォルトONだが、`hdiutil makehybrid` 自体は `-rock` オプションを受け付けない（`-iso` 指定時にRock Ridge拡張が自動的に有効になるため）。したがって実際にコマンドへ渡すのは `-iso`/`-joliet`/`-udf` のみでよく、`-rock`を渡そうとする修正はしないこと（詳細は「技術スタック」の `hdiutil makehybrid` の制約を参照）。
    - `-joliet`・`-udf` はGUI上のチェックボックスで切り替え可能にする。
+   - 「Joliet/UDFのいずれかを有効に」というGUI側のオプション検証には `rock` を含めない（上記の理由により、Rock Ridgeだけ有効な状態と全項目無効な状態は生成コマンドが同一になるため。実機で発見・修正済みの回帰、詳細は「やってはいけないこと」を参照）。
    - `-udf` はDVD/BD（BDXL・M-DISCを含む）選択時にデフォルトON（ISO9660の4GBファイルサイズ上限を回避するため）、CD選択時はデフォルトOFF。ユーザーは任意に変更できる。
 3. **音楽CDの正確なリッピング**: `MediaType.CD_AUDIO` を選択した場合、ISO作成UIの代わりに出力先フォルダ選択・書き出し形式（ALAC/AIFF/FLAC/WAV/AAC、既定はALAC）・検証チェックボックスに切り替える。以下の3要件を満たすこと。
    1. **正確な読み取り**: `cd-paranoia` をパラノイアモード（`-Z` を指定しない）で実行し、ジッター補正・C2エラー利用を有効にする。
@@ -138,6 +139,7 @@ make distclean  # clean に加えて .venv も削除
 6. **エラーハンドリング**: コピーガード付きメディア等でセクタ単位読み取りが必要なケースを検出できない場合は、明確なエラーメッセージを表示し、対処法（別ツールの利用など）を案内する。
 7. **安全な中断**: 実行中のISO作成・音楽CDリッピングは、GUI上の「中断」ボタンから中断できること。中断時は実行中の外部コマンドへ `terminate`（SIGTERM）を送り、作成途中の一時ファイル（WAV・部分的なISO等）を削除してから完了通知を出す（`IsoWorker.request_cancel` / `AudioRipWorker.request_cancel`、`audio_cd.RipCancelled`）。また、処理中はウィンドウを閉じられないようにし（`MainWindow.closeEvent`）、実行中のバックグラウンドスレッドを残したままアプリが終了しないようにすること。
 8. **音楽CDのメタデータ**: 音楽CD選択時、アルバム名・アーティスト名・年・各トラック名を入力できるようにする（`metadata.AlbumMetadata`/`TrackMetadata`）。入力内容は以下に反映する。
+   - **出力先ディレクトリ**: アルバム名が入力されている場合、指定した出力先フォルダ直下ではなく、その中にアルバム名（`metadata.sanitize_filename_component` で安全な文字列に変換）のサブディレクトリを作り、その中にトラックファイルを書き出す（`audio_cd.rip_and_convert_disc`、実際の書き出し先は`RipResult.output_directory`で分かる）。アルバム名が未入力の場合は従来通り出力先フォルダ直下に書き出す。`MainWindow._start_audio_rip()`の「出力先が空でない」上書き確認も、この実際の書き出し先に対して行うこと。
    - **ファイル名**: トラックタイトルが入力されている場合は `NN - タイトル.拡張子`、未入力なら従来通り `TrackNN.拡張子`（`audio_cd.rip_and_convert_disc` 内、`metadata.sanitize_filename_component` でファイル名として安全な文字列に変換）。
    - **タグ**: `mutagen` を使い、形式ごとに適切なタグへ書き込む（`audio_cd.write_metadata_tags`）。MP4(ALAC/AAC)はiTunes系アトム、FLACはVorbis Comment、WAV/AIFFはID3v2。全項目未入力（アルバム名・アーティスト名・全トラックタイトルが空）ならタグ付けをスキップする。
    - **オンライン検索**: 「オンラインで検索（MusicBrainz）」ボタン（GUI上の明示的なクリックでのみ動作、自動実行しない）で、ディスクのTOCから計算した [MusicBrainz Disc ID](https://musicbrainz.org/doc/Disc_ID_Calculation)（`audio_cd.query_disc_toc` + `audio_cd.disc_id_from_disc_toc`）を使い `musicbrainz.lookup_releases` でMusicBrainzに問い合わせる。0件・複数件・ネットワークエラーのいずれも例外を投げず `LookupResult` として返し、リッピング処理自体を止めないこと。複数候補時はユーザーに選ばせ、既に入力がある場合は上書き前に確認する。
@@ -176,6 +178,8 @@ make distclean  # clean に加えて .venv も削除
 - MusicBrainz APIのレート制限（1秒1リクエスト）を無視して連続で問い合わせない。IPアドレスがブロックされるリスクがある。`musicbrainz._wait_for_rate_limit` を経由しないネットワーク呼び出しを追加しない。
 - `metadata.compute_disc_id()` の実装を、実データで検証した仕様（オフセットは生LBAに `LEAD_IN_FRAMES`(150)を加算したフレーム値、SHA-1 + Base64の`+/=`を`._-`に置換）から離れた形に変更しない。1文字でもズレると生成されるDisc IDが全く別物になり、無音で「見つかりません」という結果になる（検出しにくいバグになるため要注意）。
 - `MainWindow.__init__()` から `self._on_device_changed(self.device_combo.currentIndex())` の明示呼び出しを削除しない。マウント済みドライブが1つも無い場合（`list_volumes()`が空リストを返す場合）、`device_combo`は空のままで`currentIndexChanged`シグナルが一度も発火しないため、この明示呼び出しが無いと音楽CD用のメタデータ入力欄（アルバム名/アーティスト名/トラック名テーブル等）が、何も選択されていないのに表示されたままになる回帰になる（`tests/test_main_window.py`の`test_metadata_widgets_hidden_by_default`で検出・修正済み）。
+- `_start_iso_build()`のオプション検証（「Joliet/UDFのいずれかは有効に」）に`options.rock`（Rock Ridgeチェックボックス）を含めない。`-rock`は`hdiutil makehybrid`に一切渡せず`-iso`指定時に自動的に有効になるだけの値なので、「Rock Ridgeだけ有効」と「Joliet/Rock Ridge/UDF全て無効」は生成されるコマンドが完全に同一（`-iso`のみ）になる。`rock`を判定に含めると、この2つの同一の状態のうち片方だけがエラーになるという一貫性のない挙動になる（実機での報告により発見、`tests/test_main_window.py`の`test_start_iso_build_rock_ridge_alone_is_treated_like_no_options`で検出・修正済み）。
+- 「設定ファイルの場所」等、長さが可変・予測できない文字列を表示するラベルを`QFormLayout.addRow(caption, widget)`の値カラムに置かない。`QFormLayout`の値カラムの実効幅はウィンドウ幅に対して狭くなりがちで、長いパス文字列が折り返されずに途中で見切れる（実機で報告・修正済み）。タブの全幅を使う独立した行として配置すること（`settings_path_label`を参照）。
 
 ## コミット/PR規約
 

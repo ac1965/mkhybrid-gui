@@ -255,6 +255,29 @@ def test_start_iso_build_warns_when_all_format_options_disabled(
     assert window._worker is None
 
 
+def test_start_iso_build_rock_ridge_alone_is_treated_like_no_options(
+    qtbot, window: MainWindow, _no_modal_dialogs: list, tmp_path: Path
+) -> None:
+    """Rock Ridgeだけを有効にした状態は、実際には全項目無効の状態と
+    同一のコマンド（``-iso`` のみ）を生成する（``-rock`` は
+    ``hdiutil makehybrid`` に渡せず、``-iso`` 指定時に自動的に有効に
+    なるため）。したがって「Rock Ridgeだけ有効」も「全項目無効」も、
+    どちらも同じ警告になるべきで、前者だけ素通りするのは一貫性のない
+    挙動（実機で報告された不具合）。
+    """
+    window.show()
+    _select_volume(window, _dvd_volume())
+    window.output_edit.setText(str(tmp_path / "out.iso"))
+    window.joliet_checkbox.setChecked(False)
+    window.rock_checkbox.setChecked(True)
+    window.udf_checkbox.setChecked(False)
+
+    window._on_start_clicked()
+
+    assert any(name == "warning" for name, _, _ in _no_modal_dialogs)
+    assert window._worker is None
+
+
 def test_start_audio_rip_warns_on_empty_output_path(
     qtbot,
     window: MainWindow,
