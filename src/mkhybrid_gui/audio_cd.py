@@ -111,7 +111,7 @@ REQUIRED_TOOLS: dict[AudioFormat, tuple[str, ...]] = {
 
 
 @lru_cache(maxsize=1)
-def _effective_path() -> str:
+def effective_path() -> str:
     """外部コマンド実行に使用するPATHを取得する。
 
     Finder/LaunchServices経由でGUIアプリとして起動された場合でも、
@@ -122,6 +122,11 @@ def _effective_path() -> str:
     ``/usr/local/bin``）が常に欠落し、GUI起動時に外部コマンドが
     見つからなくなる。これを避けるため、プロセスのPATHとログイン
     シェルのPATHを常にマージして返す。
+
+    Homebrewインストールの外部コマンドに依存するのはこのモジュール
+    だけではないため（``cdrdao.py``も``cdrdao``コマンドの検出に
+    この関数を再利用する）、先頭アンダースコアを付けない公開関数と
+    している。
     """
     current_path = os.environ.get("PATH", "")
 
@@ -148,15 +153,15 @@ def _effective_path() -> str:
     return ":".join(merged) if merged else current_path
 
 
-def _tool_path(tool: str) -> str | None:
+def tool_path(tool: str) -> str | None:
     """現在の実行環境で利用可能な外部コマンドのパスを返す。"""
-    return shutil.which(tool, path=_effective_path())
+    return shutil.which(tool, path=effective_path())
 
 
-def _command_env() -> dict[str, str]:
+def command_env() -> dict[str, str]:
     """外部コマンド実行用の環境変数を返す。"""
     env = os.environ.copy()
-    env["PATH"] = _effective_path()
+    env["PATH"] = effective_path()
     return env
 
 
@@ -170,7 +175,7 @@ def missing_tools(audio_format: AudioFormat) -> list[str]:
     return [
         tool
         for tool in REQUIRED_TOOLS[audio_format]
-        if _tool_path(tool) is None
+        if tool_path(tool) is None
     ]
 
 
@@ -197,7 +202,7 @@ def _run_streaming(
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        env=_command_env(),
+        env=command_env(),
     )
 
     if on_process_started is not None:
@@ -245,7 +250,7 @@ def query_track_count(device: str | None = None) -> int:
     if device:
         cmd += ["-d", device]
 
-    if _tool_path("cd-paranoia") is None:
+    if tool_path("cd-paranoia") is None:
         raise AudioCdError(
             "cd-paranoia が見つかりません。PATHを確認してください。"
         )
@@ -255,7 +260,7 @@ def query_track_count(device: str | None = None) -> int:
         capture_output=True,
         text=True,
         check=False,
-        env=_command_env(),
+        env=command_env(),
     )
 
     # cd-paranoia -Q は正常時でも終了コードが0以外になることがあるため、
@@ -347,7 +352,7 @@ def query_disc_toc(device: str | None = None) -> DiscToc:
     if device:
         cmd += ["-d", device]
 
-    if _tool_path("cd-paranoia") is None:
+    if tool_path("cd-paranoia") is None:
         raise AudioCdError(
             "cd-paranoia が見つかりません。PATHを確認してください。"
         )
@@ -357,7 +362,7 @@ def query_disc_toc(device: str | None = None) -> DiscToc:
         capture_output=True,
         text=True,
         check=False,
-        env=_command_env(),
+        env=command_env(),
     )
 
     return parse_disc_toc(result.stderr + result.stdout)

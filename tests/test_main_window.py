@@ -178,6 +178,57 @@ def test_selecting_audio_cd_shows_metadata_and_hides_iso_options(
     assert "3トラック" in window.metadata_status_label.text()
 
 
+def test_selecting_audio_cd_defaults_to_accurate_mode(
+    qtbot,
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        main_window_module,
+        "query_disc_toc",
+        lambda device: DiscToc(track_offsets=[0], leadout_offset=1000),
+    )
+
+    window.show()
+    _select_volume(window, _audio_volume())
+
+    assert window.audio_mode_label.isVisible() is True
+    assert window.audio_mode_accurate_radio.isChecked() is True
+    assert window._is_cdrdao_mode_selected() is False
+
+
+def test_selecting_cdrdao_mode_hides_accurate_rip_widgets(
+    qtbot,
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """cdrdao（ディスクイメージ）モードでは、トラックごとの変換・タグ付けに
+    関するウィジェットを隠すが、``album_edit``（TOC+BINのファイル名に
+    使う）は表示したままにする。
+    """
+    monkeypatch.setattr(
+        main_window_module,
+        "query_disc_toc",
+        lambda device: DiscToc(track_offsets=[0, 1000], leadout_offset=2000),
+    )
+
+    window.show()
+    _select_volume(window, _audio_volume())
+
+    window.audio_mode_cdrdao_radio.setChecked(True)
+
+    assert window._is_cdrdao_mode_selected() is True
+    assert window.album_edit.isVisible() is True
+    assert window.artist_edit.isVisible() is False
+    assert window.year_edit.isVisible() is False
+    assert window.track_title_table.isVisible() is False
+    assert window.verify_checkbox.isVisible() is False
+    assert window.metadata_lookup_button.isVisible() is False
+    for radio in window._audio_format_buttons.values():
+        assert radio.isVisible() is False
+    assert window.start_button.text() == "ディスクイメージを作成"
+
+
 def test_selecting_audio_cd_prefills_output_folder_from_last_directory(
     qtbot,
     window: MainWindow,
@@ -400,6 +451,196 @@ def test_start_audio_rip_warns_on_missing_tools(
 
     assert any(name == "critical" for name, _, _ in _no_modal_dialogs)
     assert window._worker is None
+
+
+def test_start_cdrdao_rip_warns_on_empty_output_path(
+    qtbot,
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+    _no_modal_dialogs: list,
+) -> None:
+    monkeypatch.setattr(
+        main_window_module,
+        "query_disc_toc",
+        lambda device: DiscToc(track_offsets=[0], leadout_offset=1000),
+    )
+
+    window.show()
+    _select_volume(window, _audio_volume())
+    window.audio_mode_cdrdao_radio.setChecked(True)
+    window.output_edit.setText("")
+
+    window._on_start_clicked()
+
+    assert any(name == "warning" for name, _, _ in _no_modal_dialogs)
+    assert window._worker is None
+
+
+def test_start_cdrdao_rip_warns_on_missing_tools(
+    qtbot,
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+    _no_modal_dialogs: list,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        main_window_module,
+        "query_disc_toc",
+        lambda device: DiscToc(track_offsets=[0], leadout_offset=1000),
+    )
+    monkeypatch.setattr(
+        main_window_module.cdrdao, "missing_tools", lambda: ["cdrdao"]
+    )
+
+    window.show()
+    _select_volume(window, _audio_volume())
+    window.audio_mode_cdrdao_radio.setChecked(True)
+    window.output_edit.setText(str(tmp_path / "out"))
+
+    window._on_start_clicked()
+
+    assert any(name == "critical" for name, _, _ in _no_modal_dialogs)
+    assert window._worker is None
+
+
+def test_start_cdrdao_rip_uses_album_name_for_base_filename(
+    qtbot,
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+    _no_modal_dialogs: list,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        main_window_module,
+        "query_disc_toc",
+        lambda device: DiscToc(track_offsets=[0], leadout_offset=1000),
+    )
+    monkeypatch.setattr(
+        main_window_module.cdrdao, "missing_tools", lambda: []
+    )
+
+    captured: dict = {}
+
+    class _FakeCdrdaoWorker:
+        def __init__(self, device, destination_dir, base_name, parent=None):
+            captured["device"] = device
+            captured["destination_dir"] = destination_dir
+            captured["base_name"] = base_name
+            self.progress = _FakeSignal()
+            self.finished_ok = _FakeSignal()
+
+        def isRunning(self) -> bool:  # noqa: N802 - Qtの命名規則に合わせる
+            return False
+
+        def start(self) -> None:
+            captured["started"] = True
+
+    monkeypatch.setattr(
+        main_window_module, "CdrdaoWorker", _FakeCdrdaoWorker
+    )
+
+    window.show()
+    _select_volume(window, _audio_volume())
+    window.audio_mode_cdrdao_radio.setChecked(True)
+    window.output_edit.setText(str(tmp_path / "out"))
+    window.album_edit.setText("My Great Album")
+
+    window._on_start_clicked()
+
+    assert captured["base_name"] == "My Great Album"
+    assert captured.get("started") is True
+
+
+def test_start_cdrdao_rip_falls_back_to_volume_name_without_album(
+    qtbot,
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+    _no_modal_dialogs: list,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        main_window_module,
+        "query_disc_toc",
+        lambda device: DiscToc(track_offsets=[0], leadout_offset=1000),
+    )
+    monkeypatch.setattr(
+        main_window_module.cdrdao, "missing_tools", lambda: []
+    )
+
+    captured: dict = {}
+
+    class _FakeCdrdaoWorker:
+        def __init__(self, device, destination_dir, base_name, parent=None):
+            captured["base_name"] = base_name
+            self.progress = _FakeSignal()
+            self.finished_ok = _FakeSignal()
+
+        def isRunning(self) -> bool:  # noqa: N802 - Qtの命名規則に合わせる
+            return False
+
+        def start(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        main_window_module, "CdrdaoWorker", _FakeCdrdaoWorker
+    )
+
+    window.show()
+    _select_volume(window, _audio_volume())
+    window.audio_mode_cdrdao_radio.setChecked(True)
+    window.output_edit.setText(str(tmp_path / "out"))
+    window.album_edit.setText("")
+
+    window._on_start_clicked()
+
+    assert captured["base_name"] == "TEST_CD"  # _audio_volume()のvolume_name
+
+
+def test_start_cdrdao_rip_asks_before_overwriting_existing_files(
+    qtbot,
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        main_window_module,
+        "query_disc_toc",
+        lambda device: DiscToc(track_offsets=[0], leadout_offset=1000),
+    )
+    monkeypatch.setattr(
+        main_window_module.cdrdao, "missing_tools", lambda: []
+    )
+    monkeypatch.setattr(
+        main_window_module, "CdrdaoWorker", lambda *a, **k: None
+    )
+
+    dest = tmp_path / "out"
+    dest.mkdir()
+    (dest / "TEST_CD.toc").write_text("existing")
+
+    calls: list = []
+    monkeypatch.setattr(
+        QMessageBox,
+        "question",
+        lambda *a, **k: calls.append(True)
+        or QMessageBox.StandardButton.No,
+    )
+
+    window.show()
+    _select_volume(window, _audio_volume())
+    window.audio_mode_cdrdao_radio.setChecked(True)
+    window.output_edit.setText(str(dest))
+    window.album_edit.setText("")
+
+    window._on_start_clicked()
+
+    assert calls == [True]
+    assert window._worker is None
+
+
+class _FakeSignal:
+    def connect(self, *_args, **_kwargs) -> None:
+        return None
 
 
 # --- メタデータの収集 ------------------------------------------------------
@@ -663,6 +904,7 @@ def test_construction_applies_saved_ui_preferences(
                 udf=True,
                 verify=False,
                 audio_format="FLAC",
+                audio_rip_mode="CDRDAO_IMAGE",
             )
         )
     )
@@ -676,6 +918,7 @@ def test_construction_applies_saved_ui_preferences(
     assert w.verify_checkbox.isChecked() is False
     assert w._audio_format_buttons[AudioFormat.FLAC].isChecked() is True
     assert w._last_output_directory == "/Volumes/Backup"
+    assert w.audio_mode_cdrdao_radio.isChecked() is True
 
 
 def test_construction_falls_back_to_alac_for_unknown_saved_format(
@@ -704,6 +947,7 @@ def test_close_event_saves_current_ui_preferences(
     window.verify_checkbox.setChecked(False)
     window._audio_format_buttons[AudioFormat.FLAC].setChecked(True)
     window._last_output_directory = "/tmp/my-output"
+    window.audio_mode_cdrdao_radio.setChecked(True)
 
     window.closeEvent(QCloseEvent())
 
@@ -714,6 +958,7 @@ def test_close_event_saves_current_ui_preferences(
     assert saved.verify is False
     assert saved.audio_format == "FLAC"
     assert saved.last_output_directory == "/tmp/my-output"
+    assert saved.audio_rip_mode == "CDRDAO_IMAGE"
 
 
 def test_close_event_while_worker_running_does_not_save_preferences(

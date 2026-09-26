@@ -74,6 +74,11 @@ class UiPreferences:
     メンバー名（例: ``"ALAC"``）で保存する。表示ラベルは将来的な
     文言変更の影響を受けうるため、設定ファイルの安定した識別子には
     向かない。
+
+    ``audio_rip_mode`` も同様に、``"ACCURATE"``（cd-paranoiaによる
+    トラックごとの正確なリッピング、既定）または``"CDRDAO_IMAGE"``
+    （cdrdaoによるTOC+BINディスクイメージ作成）のいずれかをコードで
+    保存する。
     """
 
     last_output_directory: str = ""
@@ -82,6 +87,7 @@ class UiPreferences:
     udf: bool = False
     verify: bool = True
     audio_format: str = "ALAC"
+    audio_rip_mode: str = "ACCURATE"
 
 
 @dataclass(frozen=True)

@@ -31,6 +31,7 @@ def test_get_config_returns_defaults_when_no_file(
     assert result.ui.joliet is True
     assert result.ui.udf is False
     assert result.ui.audio_format == "ALAC"
+    assert result.ui.audio_rip_mode == "ACCURATE"
 
 
 def test_get_config_overrides_from_toml_file(
@@ -72,6 +73,7 @@ def test_get_config_overrides_ui_section_from_toml_file(
         udf = true
         verify = false
         audio_format = "FLAC"
+        audio_rip_mode = "CDRDAO_IMAGE"
         """,
         encoding="utf-8",
     )
@@ -85,6 +87,7 @@ def test_get_config_overrides_ui_section_from_toml_file(
     assert result.ui.udf is True
     assert result.ui.verify is False
     assert result.ui.audio_format == "FLAC"
+    assert result.ui.audio_rip_mode == "CDRDAO_IMAGE"
     # 明示的に上書きしていない値は既定値のまま。
     assert result.ui.rock is True
 
@@ -247,6 +250,7 @@ def test_to_toml_string_round_trips_through_tomllib() -> None:
             udf=True,
             verify=False,
             audio_format="FLAC",
+            audio_rip_mode="CDRDAO_IMAGE",
         ),
     )
 
@@ -259,6 +263,7 @@ def test_to_toml_string_round_trips_through_tomllib() -> None:
     assert parsed["ui"]["joliet"] is False
     assert parsed["ui"]["udf"] is True
     assert parsed["ui"]["audio_format"] == "FLAC"
+    assert parsed["ui"]["audio_rip_mode"] == "CDRDAO_IMAGE"
 
 
 def test_to_toml_string_escapes_special_characters_in_strings() -> None:
@@ -308,6 +313,7 @@ def test_save_config_round_trips_via_get_config(
             udf=True,
             verify=False,
             audio_format="WAV",
+            audio_rip_mode="CDRDAO_IMAGE",
         ),
     )
 

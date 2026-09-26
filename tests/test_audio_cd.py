@@ -225,7 +225,7 @@ def test_missing_tools_uses_effective_path(
     )
     monkeypatch.setattr(
         audio_cd,
-        "_effective_path",
+        "effective_path",
         lambda: "/opt/homebrew/bin:/usr/bin:/bin",
     )
 
@@ -247,7 +247,7 @@ def test_missing_tools_reports_absent_binaries(
     )
     monkeypatch.setattr(
         audio_cd,
-        "_effective_path",
+        "effective_path",
         lambda: "/usr/bin:/bin",
     )
 
@@ -267,7 +267,7 @@ def test_missing_tools_empty_when_all_present(
     )
     monkeypatch.setattr(
         audio_cd,
-        "_effective_path",
+        "effective_path",
         lambda: "/usr/bin:/bin",
     )
 
@@ -284,7 +284,7 @@ def test_effective_path_merges_shell_path_even_when_process_path_is_set(
     ログインシェルへの問い合わせ自体をスキップしており、Homebrewの
     パスが決して追加されないバグがあった。
     """
-    audio_cd._effective_path.cache_clear()
+    audio_cd.effective_path.cache_clear()
 
     monkeypatch.setenv("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
     monkeypatch.setenv("SHELL", "/bin/zsh")
@@ -299,9 +299,9 @@ def test_effective_path_merges_shell_path_even_when_process_path_is_set(
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     try:
-        effective = audio_cd._effective_path()
+        effective = audio_cd.effective_path()
     finally:
-        audio_cd._effective_path.cache_clear()
+        audio_cd.effective_path.cache_clear()
 
     entries = effective.split(":")
 
@@ -315,7 +315,7 @@ def test_effective_path_merges_shell_path_even_when_process_path_is_set(
 def test_effective_path_falls_back_to_process_path_when_shell_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    audio_cd._effective_path.cache_clear()
+    audio_cd.effective_path.cache_clear()
 
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
 
@@ -325,9 +325,9 @@ def test_effective_path_falls_back_to_process_path_when_shell_fails(
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     try:
-        assert audio_cd._effective_path() == "/usr/bin:/bin"
+        assert audio_cd.effective_path() == "/usr/bin:/bin"
     finally:
-        audio_cd._effective_path.cache_clear()
+        audio_cd.effective_path.cache_clear()
 
 
 def test_command_environment_uses_effective_path(
@@ -335,7 +335,7 @@ def test_command_environment_uses_effective_path(
 ) -> None:
     monkeypatch.setattr(
         audio_cd,
-        "_effective_path",
+        "effective_path",
         lambda: "/opt/homebrew/bin:/usr/bin:/bin",
     )
     monkeypatch.setenv(
@@ -343,7 +343,7 @@ def test_command_environment_uses_effective_path(
         "/usr/bin:/bin",
     )
 
-    env = audio_cd._command_env()
+    env = audio_cd.command_env()
 
     assert env["PATH"] == "/opt/homebrew/bin:/usr/bin:/bin"
 
@@ -404,7 +404,7 @@ def test_rip_track_verified_accepts_matching_second_read(
     )
     monkeypatch.setattr(
         audio_cd,
-        "_effective_path",
+        "effective_path",
         lambda: "/opt/homebrew/bin:/usr/bin:/bin",
     )
 
@@ -449,7 +449,7 @@ def test_rip_track_verified_falls_back_to_unverified_after_max_attempts(
     )
     monkeypatch.setattr(
         audio_cd,
-        "_effective_path",
+        "effective_path",
         lambda: "/usr/bin:/bin",
     )
 
@@ -480,7 +480,7 @@ def test_rip_track_verified_single_attempt_when_verify_disabled(
     )
     monkeypatch.setattr(
         audio_cd,
-        "_effective_path",
+        "effective_path",
         lambda: "/usr/bin:/bin",
     )
 
@@ -513,7 +513,7 @@ def test_rip_track_verified_raises_when_every_attempt_fails(
     )
     monkeypatch.setattr(
         audio_cd,
-        "_effective_path",
+        "effective_path",
         lambda: "/usr/bin:/bin",
     )
 
@@ -561,7 +561,7 @@ def test_rip_track_verified_raises_cancelled_after_process_and_cleans_up(
     monkeypatch.setattr(subprocess, "Popen", _FakeRipPopen)
     monkeypatch.setattr(
         audio_cd,
-        "_effective_path",
+        "effective_path",
         lambda: "/usr/bin:/bin",
     )
 
@@ -603,7 +603,7 @@ def test_rip_and_convert_disc_stops_early_when_cancelled(
     monkeypatch.setattr(subprocess, "Popen", _FakeEndToEndPopen)
     monkeypatch.setattr(
         audio_cd,
-        "_effective_path",
+        "effective_path",
         lambda: "/opt/homebrew/bin:/usr/bin:/bin",
     )
 
@@ -660,7 +660,7 @@ def test_rip_and_convert_disc_reports_per_track_percent(
     monkeypatch.setattr(subprocess, "Popen", _FakeEndToEndPopen)
     monkeypatch.setattr(
         audio_cd,
-        "_effective_path",
+        "effective_path",
         lambda: "/opt/homebrew/bin:/usr/bin:/bin",
     )
 
@@ -723,7 +723,7 @@ def test_convert_audio_raises_on_failure(
     )
     monkeypatch.setattr(
         audio_cd,
-        "_effective_path",
+        "effective_path",
         lambda: "/usr/bin:/bin",
     )
 
@@ -946,7 +946,7 @@ def test_rip_and_convert_disc_end_to_end(
 
     monkeypatch.setattr(
         audio_cd,
-        "_effective_path",
+        "effective_path",
         lambda: "/opt/homebrew/bin:/usr/bin:/bin",
     )
 
@@ -999,7 +999,7 @@ def test_rip_and_convert_disc_with_metadata_names_files_and_writes_tags(
     monkeypatch.setattr(subprocess, "Popen", _FakeWavPopen)
     monkeypatch.setattr(
         audio_cd,
-        "_effective_path",
+        "effective_path",
         lambda: "/opt/homebrew/bin:/usr/bin:/bin",
     )
 
@@ -1077,7 +1077,7 @@ def test_rip_and_convert_disc_without_album_name_uses_destination_dir_directly(
     monkeypatch.setattr(subprocess, "Popen", _FakeWavPopen)
     monkeypatch.setattr(
         audio_cd,
-        "_effective_path",
+        "effective_path",
         lambda: "/opt/homebrew/bin:/usr/bin:/bin",
     )
 
@@ -1134,7 +1134,7 @@ def test_rip_and_convert_disc_uses_fallback_folder_name_without_album(
     monkeypatch.setattr(subprocess, "Popen", _FakeWavPopen)
     monkeypatch.setattr(
         audio_cd,
-        "_effective_path",
+        "effective_path",
         lambda: "/opt/homebrew/bin:/usr/bin:/bin",
     )
 
@@ -1185,7 +1185,7 @@ def test_rip_and_convert_disc_album_name_takes_priority_over_fallback(
     monkeypatch.setattr(subprocess, "Popen", _FakeWavPopen)
     monkeypatch.setattr(
         audio_cd,
-        "_effective_path",
+        "effective_path",
         lambda: "/opt/homebrew/bin:/usr/bin:/bin",
     )
 

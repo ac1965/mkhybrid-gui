@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from mkhybrid_gui import config
+from mkhybrid_gui import cdrdao, config
 from mkhybrid_gui.audio_cd import (
     AudioCdError,
     AudioFormat,
@@ -41,6 +41,7 @@ from mkhybrid_gui.audio_cd import (
     missing_tools,
     query_disc_toc,
 )
+from mkhybrid_gui.cdrdao import CdrdaoWorker
 from mkhybrid_gui.disk_utils import (
     MediaType,
     Volume,
@@ -69,6 +70,7 @@ _AUDIO_FORMAT_ORDER = [
 _BREW_PACKAGES = {
     "cd-paranoia": "libcdio-paranoia",
     "flac": "flac",
+    "cdrdao": "cdrdao",
 }
 
 
@@ -81,7 +83,7 @@ class MainWindow(QMainWindow):
         self.resize(640, 560)
 
         self._volumes: list[Volume] = []
-        self._worker: IsoWorker | AudioRipWorker | None = None
+        self._worker: IsoWorker | AudioRipWorker | CdrdaoWorker | None = None
         self._is_audio_job = False
         self._cancel_requested = False
         self._audio_work_tmpdir: tempfile.TemporaryDirectory[str] | None = None
@@ -125,6 +127,26 @@ class MainWindow(QMainWindow):
         device_row.addWidget(self.device_combo, stretch=1)
         device_row.addWidget(self.refresh_button)
         form.addRow("ドライブ/ボリューム:", device_row)
+
+        audio_mode_row = QHBoxLayout()
+        self.audio_mode_group = QButtonGroup(self)
+        self.audio_mode_accurate_radio = QRadioButton(
+            "正確なリッピング（cd-paranoia、トラックごとに変換・タグ付け）"
+        )
+        self.audio_mode_accurate_radio.setChecked(True)
+        self.audio_mode_cdrdao_radio = QRadioButton(
+            "ディスクイメージ（cdrdao、TOC+BIN。コピーガード付き等のフォールバック用）"
+        )
+        self.audio_mode_group.addButton(self.audio_mode_accurate_radio)
+        self.audio_mode_group.addButton(self.audio_mode_cdrdao_radio)
+        self.audio_mode_accurate_radio.toggled.connect(
+            self._on_audio_mode_changed
+        )
+        audio_mode_row.addWidget(self.audio_mode_accurate_radio)
+        audio_mode_row.addWidget(self.audio_mode_cdrdao_radio)
+        audio_mode_row.addStretch(1)
+        self.audio_mode_label = QLabel("音楽CDの書き出し方法:")
+        form.addRow(self.audio_mode_label, audio_mode_row)
 
         output_row = QHBoxLayout()
         self.output_edit = QLineEdit()
@@ -373,6 +395,11 @@ class MainWindow(QMainWindow):
 
         self._audio_format_buttons[audio_format].setChecked(True)
 
+        if app_config.ui.audio_rip_mode == "CDRDAO_IMAGE":
+            self.audio_mode_cdrdao_radio.setChecked(True)
+        else:
+            self.audio_mode_accurate_radio.setChecked(True)
+
         self.cd_max_size_spin.setValue(
             max(1, app_config.media_size.cd_max_bytes // self._BYTES_PER_MB)
         )
@@ -399,6 +426,11 @@ class MainWindow(QMainWindow):
             udf=self.udf_checkbox.isChecked(),
             verify=self.verify_checkbox.isChecked(),
             audio_format=self._selected_audio_format().name,
+            audio_rip_mode=(
+                "CDRDAO_IMAGE"
+                if self._is_cdrdao_mode_selected()
+                else "ACCURATE"
+            ),
         )
 
         return config.AppConfig(
@@ -513,17 +545,10 @@ class MainWindow(QMainWindow):
         self.joliet_checkbox.setVisible(not is_audio)
         self.rock_checkbox.setVisible(not is_audio)
         self.udf_checkbox.setVisible(not is_audio)
-        self.audio_format_label.setVisible(is_audio)
 
-        for radio in self._audio_format_buttons.values():
-            radio.setVisible(is_audio)
-
-        self.verify_checkbox.setVisible(is_audio)
-        self.start_button.setText(
-            "オーディオトラックを書き出す"
-            if is_audio
-            else "ISOイメージを作成"
-        )
+        self.audio_mode_label.setVisible(is_audio)
+        self.audio_mode_accurate_radio.setVisible(is_audio)
+        self.audio_mode_cdrdao_radio.setVisible(is_audio)
 
         if volume is not None and not is_audio:
             # DVD/Blu-ray（BDXL・M-DISCを含む）は大容量ファイルを含みうるためUDFを既定でON
@@ -539,13 +564,6 @@ class MainWindow(QMainWindow):
 
         self.metadata_fields_label.setVisible(is_audio)
         self.album_edit.setVisible(is_audio)
-        self.artist_edit.setVisible(is_audio)
-        self.year_edit.setVisible(is_audio)
-        self.metadata_lookup_row_label.setVisible(is_audio)
-        self.metadata_lookup_button.setVisible(is_audio)
-        self.metadata_privacy_label.setVisible(is_audio)
-        self.metadata_status_label.setVisible(is_audio)
-        self.track_title_table.setVisible(is_audio)
 
         if is_audio and volume is not None:
             self._prepare_audio_metadata_ui(volume)
@@ -556,6 +574,51 @@ class MainWindow(QMainWindow):
             self.artist_edit.clear()
             self.year_edit.clear()
             self.metadata_status_label.setText("")
+
+        self._on_audio_mode_changed()
+
+    def _is_cdrdao_mode_selected(self) -> bool:
+        return self.audio_mode_cdrdao_radio.isChecked()
+
+    def _on_audio_mode_changed(self, *_args: object) -> None:
+        """音楽CDの「正確なリッピング」/「ディスクイメージ（cdrdao）」の
+        切り替え、およびISO作成/音楽CD自体の切り替えの両方に応じて、
+        「作成」タブのウィジェット表示を更新する。
+
+        cdrdaoモードは、トラックごとの変換・タグ付けを行わない
+        ディスク全体のバックアップのため、正確なリッピング専用の
+        ウィジェット（書き出し形式・厳密な検証・アーティスト名/年・
+        MusicBrainz検索・トラック名テーブル）を隠す。``album_edit``は
+        両モードで表示したままにする（cdrdaoモードでのTOC+BINファイル名
+        にも使うため）。
+        """
+        volume: Volume | None = self.device_combo.currentData()
+        is_audio = (
+            volume is not None and volume.media_type == MediaType.CD_AUDIO
+        )
+        is_cdrdao = is_audio and self._is_cdrdao_mode_selected()
+        accurate_visible = is_audio and not is_cdrdao
+
+        self.audio_format_label.setVisible(accurate_visible)
+
+        for radio in self._audio_format_buttons.values():
+            radio.setVisible(accurate_visible)
+
+        self.verify_checkbox.setVisible(accurate_visible)
+        self.artist_edit.setVisible(accurate_visible)
+        self.year_edit.setVisible(accurate_visible)
+        self.metadata_lookup_row_label.setVisible(accurate_visible)
+        self.metadata_lookup_button.setVisible(accurate_visible)
+        self.metadata_privacy_label.setVisible(accurate_visible)
+        self.metadata_status_label.setVisible(accurate_visible)
+        self.track_title_table.setVisible(accurate_visible)
+
+        if is_cdrdao:
+            self.start_button.setText("ディスクイメージを作成")
+        elif is_audio:
+            self.start_button.setText("オーディオトラックを書き出す")
+        else:
+            self.start_button.setText("ISOイメージを作成")
 
     def _prepare_audio_metadata_ui(self, volume: Volume) -> None:
         """音楽CD選択時に、TOCを取得してトラック名入力欄の行数を確定させる。"""
@@ -772,7 +835,10 @@ class MainWindow(QMainWindow):
             return
 
         if volume.media_type == MediaType.CD_AUDIO:
-            self._start_audio_rip(volume)
+            if self._is_cdrdao_mode_selected():
+                self._start_cdrdao_rip(volume)
+            else:
+                self._start_audio_rip(volume)
         else:
             self._start_iso_build(volume)
 
@@ -951,6 +1017,94 @@ class MainWindow(QMainWindow):
         self._worker = worker
         worker.start()
 
+    def _start_cdrdao_rip(self, volume: Volume) -> None:
+        """cdrdaoによるディスクイメージ（TOC+BIN）作成を開始する。
+
+        トラックごとの変換・タグ付けは行わないため、
+        ``audio_cd.rip_and_convert_disc``のようなアルバム名サブ
+        フォルダは作らず、出力先フォルダ直下に直接``{アルバム名}.toc``/
+        ``.bin``を書き出す（ISO作成と同様、1回の実行につき1組の
+        ファイルのため）。
+        """
+        dest_text = self.output_edit.text().strip()
+
+        if not dest_text:
+            QMessageBox.warning(
+                self,
+                "入力エラー",
+                "出力先フォルダを指定してください。",
+            )
+            return
+
+        missing = cdrdao.missing_tools()
+
+        if missing:
+            tools = " ".join(missing)
+            brew_packages = [
+                _BREW_PACKAGES[tool]
+                for tool in missing
+                if tool in _BREW_PACKAGES
+            ]
+
+            message = f"ディスクイメージの作成には次のコマンドが必要です: {tools}"
+
+            if brew_packages:
+                message += (
+                    "\n\nHomebrewでインストールしてください:\n"
+                    f"  brew install {' '.join(brew_packages)}"
+                )
+
+            QMessageBox.critical(
+                self,
+                "外部ツールが不足しています",
+                message,
+            )
+            return
+
+        dest_path = Path(dest_text)
+        fallback_base_name = volume.volume_name or volume.device_identifier
+        base_name = sanitize_filename_component(
+            self.album_edit.text().strip() or fallback_base_name
+        )
+
+        toc_path = dest_path / f"{base_name}.toc"
+        bin_path = dest_path / f"{base_name}.bin"
+
+        if toc_path.exists() or bin_path.exists():
+            reply = QMessageBox.question(
+                self,
+                "確認",
+                f"{toc_path.name} / {bin_path.name} は既に存在します。"
+                "上書きしますか？",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No,
+            )
+
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+        self._is_audio_job = True
+        self._cancel_requested = False
+        self._drive_option_note_shown = False
+        # cdrdaoは一時作業ディレクトリを使わないため、前回の正確な
+        # リッピングで使った TemporaryDirectory を _on_finished() が
+        # 誤って二重クリーンアップしないよう、明示的に None へ戻す。
+        self._audio_work_tmpdir = None
+        self.log_view.clear()
+        self.status_label.setText("ディスクイメージを作成しています…")
+        self._start_progress_indicator()
+        self._set_controls_enabled(False)
+
+        device = whole_disk_raw_device(volume.device_identifier)
+
+        worker = CdrdaoWorker(device, dest_path, base_name, parent=self)
+
+        worker.progress.connect(self._on_progress)
+        worker.finished_ok.connect(self._on_finished)
+
+        self._worker = worker
+        worker.start()
+
     def _start_progress_indicator(self) -> None:
         """処理開始時に進捗バーを表示する。
 
@@ -982,6 +1136,8 @@ class MainWindow(QMainWindow):
         self.joliet_checkbox.setEnabled(enabled)
         self.rock_checkbox.setEnabled(enabled)
         self.udf_checkbox.setEnabled(enabled)
+        self.audio_mode_accurate_radio.setEnabled(enabled)
+        self.audio_mode_cdrdao_radio.setEnabled(enabled)
 
         for radio in self._audio_format_buttons.values():
             radio.setEnabled(enabled)
