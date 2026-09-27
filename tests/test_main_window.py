@@ -1159,6 +1159,10 @@ def test_metadata_lookup_finished_applies_single_candidate(
     assert window.album_edit.text() == "Found Album"
     assert window.artist_edit.text() == "Found Artist"
     assert window.track_title_table.item(0, 1).text() == "Found Title"
+    # 1件のみ一致した旨（Disc IDはプレス版ごとに異なる、という理由）が
+    # ステータス表示に明示され、他の版が検索されなかった/見落とした
+    # ように誤解されないことを確認する。
+    assert "1件のみ一致" in window.metadata_status_label.text()
 
 
 class _FakeCandidateDialog:
@@ -1229,6 +1233,9 @@ def test_metadata_lookup_finished_applies_selected_candidate_from_dialog(
     assert window.album_edit.text() == "Second Album"
     assert window.artist_edit.text() == "Second Artist"
     assert window.track_title_table.item(0, 1).text() == "Second Title"
+    # 複数候補から選択した場合は、1件のみ一致した場合専用の文言
+    # （「1件のみ一致」）を出さない。
+    assert "1件のみ一致" not in window.metadata_status_label.text()
 
 
 def test_metadata_lookup_finished_dialog_cancelled_shows_status(

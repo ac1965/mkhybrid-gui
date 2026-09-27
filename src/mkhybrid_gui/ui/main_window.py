@@ -872,6 +872,17 @@ class MainWindow(QMainWindow):
 
         if len(result.candidates) == 1:
             candidate = result.candidates[0]
+            # Disc IDはCDのプレス版（工場・マスタリング）ごとに異なる
+            # ため、収録曲が同じ他の版（例: 別リージョン盤・再発盤）が
+            # MusicBrainzに登録されていても、通常は別のDisc IDとして
+            # 扱われヒットしない。1件しか一致しなかったことを明示し、
+            # 「他の版が検索されていないのではなく、Disc ID一致では
+            # そもそも1件しか無かった」と誤解なく伝える。
+            applied_message = (
+                "MusicBrainzで1件のみ一致しました（Disc IDはCDのプレス版"
+                "ごとに異なるため、同じ収録曲の他の版があっても通常は"
+                "ヒットしません）。内容を確認してください。"
+            )
         else:
             dialog = MusicBrainzCandidateDialog(result.candidates, parent=self)
 
@@ -892,6 +903,9 @@ class MainWindow(QMainWindow):
                 return
 
             candidate = result.candidates[index]
+            applied_message = (
+                "メタデータを反映しました。内容を確認してください。"
+            )
 
         if self._has_existing_metadata_input():
             reply = QMessageBox.question(
@@ -909,9 +923,7 @@ class MainWindow(QMainWindow):
                 return
 
         self._apply_album_metadata(candidate.album)
-        self.metadata_status_label.setText(
-            "メタデータを反映しました。内容を確認してください。"
-        )
+        self.metadata_status_label.setText(applied_message)
 
     def _has_existing_metadata_input(self) -> bool:
         if self.album_edit.text().strip() or self.artist_edit.text().strip():
