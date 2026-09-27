@@ -113,6 +113,7 @@ make distclean  # clean に加えて .venv も削除
 - macOS依存コマンド（`hdiutil`, `diskutil`）の実行結果は必ずreturncodeとstderrをチェックし、GUI側にエラーメッセージとして表示する。
 - ハードコードされた `/dev/diskN` を避け、`diskutil list -plist` の出力をパースして選択肢をユーザーに提示する。
 - ビジネスロジック層（`disk_utils.py`, `iso_builder.py`, `audio_cd.py`, `metadata.py`, `musicbrainz.py`, `config.py`）はUIフレームワーク（PySide6）に依存しない設計とし、単体でテスト可能にする。`musicbrainz.py` はネットワークI/O部分（`url_opener`）を差し替え可能にし、実ネットワークを使わずにテストできるようにする。
+- `MainWindow`でジョブ（ISO作成/正確なリッピング/cdrdao等）を開始する処理は、`_require_output_path()`（出力先未入力チェック）・`_check_required_tools()`（外部ツール不足チェック）・`_confirm()`（Yes/No確認ダイアログ）・`_begin_job()`（状態初期化・UI更新）・`_launch_worker()`（シグナル接続・起動）という共通ヘルパーを再利用すること。新しいジョブ種別を追加する際も、これらのヘルパーを使わず個別に警告ダイアログや起動処理を書き直さない（3種類のジョブで同一パターンが重複していたものを1回のリファクタリングで共通化した経緯があり、同じ重複を再発させないため）。
 
 ## 主要な実装要件（機能仕様）
 

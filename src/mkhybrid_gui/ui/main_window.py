@@ -871,15 +871,79 @@ class MainWindow(QMainWindow):
         else:
             self._start_iso_build(volume)
 
-    def _start_iso_build(self, volume: Volume) -> None:
-        output_text = self.output_edit.text().strip()
+    # -- ジョブ開始の共通処理（ISO作成/正確なリッピング/cdrdaoで共有） -----
 
-        if not output_text:
-            QMessageBox.warning(
-                self,
-                "入力エラー",
-                "出力先ISOファイルを指定してください。",
+    def _require_output_path(self, label: str) -> str | None:
+        """出力先入力欄が空でないことを確認する。空ならエラー表示して`None`を返す。"""
+        text = self.output_edit.text().strip()
+
+        if not text:
+            QMessageBox.warning(self, "入力エラー", f"{label}を指定してください。")
+            return None
+
+        return text
+
+    def _check_required_tools(self, missing: list[str], purpose: str) -> bool:
+        """不足している外部ツールが無いことを確認する。
+
+        あれば`brew install`の案内を含むエラーダイアログを表示して`False`を
+        返す（呼び出し側は処理を開始せず中断すること）。
+        """
+        if not missing:
+            return True
+
+        tools = " ".join(missing)
+        brew_packages = [
+            _BREW_PACKAGES[tool] for tool in missing if tool in _BREW_PACKAGES
+        ]
+
+        message = f"{purpose}には次のコマンドが必要です: {tools}"
+
+        if brew_packages:
+            message += (
+                "\n\nHomebrewでインストールしてください:\n"
+                f"  brew install {' '.join(brew_packages)}"
             )
+
+        QMessageBox.critical(self, "外部ツールが不足しています", message)
+        return False
+
+    def _confirm(self, title: str, message: str) -> bool:
+        """Yes/Noの確認ダイアログを表示し、「はい」が選ばれたかを返す。"""
+        reply = QMessageBox.question(
+            self,
+            title,
+            message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
+
+    def _begin_job(self, *, is_audio_job: bool, status_text: str) -> None:
+        """ジョブ開始時の共通の状態初期化・UI更新を行う。"""
+        self._is_audio_job = is_audio_job
+        self._cancel_requested = False
+        self._drive_option_note_shown = False
+        self.log_view.clear()
+        self.status_label.setText(status_text)
+        self._start_progress_indicator()
+        self._set_controls_enabled(False)
+
+    def _launch_worker(self, worker, *, with_percent: bool = False) -> None:
+        """ワーカーのシグナル接続と起動を行う共通処理。"""
+        worker.progress.connect(self._on_progress)
+
+        if with_percent:
+            worker.progress_percent.connect(self._on_progress_percent)
+
+        worker.finished_ok.connect(self._on_finished)
+
+        self._worker = worker
+        worker.start()
+
+    def _start_iso_build(self, volume: Volume) -> None:
+        output_text = self._require_output_path("出力先ISOファイル")
+
+        if output_text is None:
             return
 
         options = IsoOptions(
@@ -906,27 +970,16 @@ class MainWindow(QMainWindow):
 
         output_path = Path(output_text)
 
-        if output_path.exists():
-            reply = QMessageBox.question(
-                self,
-                "確認",
-                f"{output_path} は既に存在します。上書きしますか？",
-                QMessageBox.StandardButton.Yes
-                | QMessageBox.StandardButton.No,
-            )
-
-            if reply != QMessageBox.StandardButton.Yes:
-                return
+        if output_path.exists() and not self._confirm(
+            "確認", f"{output_path} は既に存在します。上書きしますか？"
+        ):
+            return
 
         source = volume.mount_point or f"/dev/{volume.device_identifier}"
 
-        self._is_audio_job = False
-        self._cancel_requested = False
-        self._drive_option_note_shown = False
-        self.log_view.clear()
-        self.status_label.setText("ISOイメージを作成しています…")
-        self._start_progress_indicator()
-        self._set_controls_enabled(False)
+        self._begin_job(
+            is_audio_job=False, status_text="ISOイメージを作成しています…"
+        )
 
         worker = IsoWorker(
             source,
@@ -935,51 +988,20 @@ class MainWindow(QMainWindow):
             parent=self,
         )
 
-        worker.progress.connect(self._on_progress)
-        worker.progress_percent.connect(self._on_progress_percent)
-        worker.finished_ok.connect(self._on_finished)
-
-        self._worker = worker
-        worker.start()
+        self._launch_worker(worker, with_percent=True)
 
     def _start_audio_rip(self, volume: Volume) -> None:
-        dest_text = self.output_edit.text().strip()
+        dest_text = self._require_output_path("出力先フォルダ")
 
-        if not dest_text:
-            QMessageBox.warning(
-                self,
-                "入力エラー",
-                "出力先フォルダを指定してください。",
-            )
+        if dest_text is None:
             return
 
         audio_format = self._selected_audio_format()
         missing = missing_tools(audio_format)
 
-        if missing:
-            tools = " ".join(missing)
-            brew_packages = [
-                _BREW_PACKAGES[tool]
-                for tool in missing
-                if tool in _BREW_PACKAGES
-            ]
-
-            message = (
-                f"{audio_format.value} の書き出しには次のコマンドが必要です: "
-                f"{tools}"
-            )
-
-            if brew_packages:
-                message += (
-                    "\n\nHomebrewでインストールしてください:\n"
-                    f"  brew install {' '.join(brew_packages)}"
-                )
-
-            QMessageBox.critical(
-                self,
-                "外部ツールが不足しています",
-                message,
-            )
+        if not self._check_required_tools(
+            missing, f"{audio_format.value} の書き出し"
+        ):
             return
 
         dest_path = Path(dest_text)
@@ -999,28 +1021,21 @@ class MainWindow(QMainWindow):
             folder_name
         )
 
-        if actual_output_dir.exists() and any(
-            actual_output_dir.iterdir()
-        ):
-            reply = QMessageBox.question(
-                self,
+        if (
+            actual_output_dir.exists()
+            and any(actual_output_dir.iterdir())
+            and not self._confirm(
                 "確認",
                 f"{actual_output_dir} は空ではありません。"
                 "同名ファイルは上書きされます。続行しますか？",
-                QMessageBox.StandardButton.Yes
-                | QMessageBox.StandardButton.No,
             )
+        ):
+            return
 
-            if reply != QMessageBox.StandardButton.Yes:
-                return
-
-        self._is_audio_job = True
-        self._cancel_requested = False
-        self._drive_option_note_shown = False
-        self.log_view.clear()
-        self.status_label.setText("オーディオトラックを書き出しています…")
-        self._start_progress_indicator()
-        self._set_controls_enabled(False)
+        self._begin_job(
+            is_audio_job=True,
+            status_text="オーディオトラックを書き出しています…",
+        )
 
         self._audio_work_tmpdir = tempfile.TemporaryDirectory(
             prefix="mkhybrid-gui-rip-"
@@ -1040,12 +1055,7 @@ class MainWindow(QMainWindow):
             parent=self,
         )
 
-        worker.progress.connect(self._on_progress)
-        worker.progress_percent.connect(self._on_progress_percent)
-        worker.finished_ok.connect(self._on_finished)
-
-        self._worker = worker
-        worker.start()
+        self._launch_worker(worker, with_percent=True)
 
     def _start_cdrdao_rip(self, volume: Volume) -> None:
         """cdrdaoによるディスクイメージ（TOC+BIN）作成を開始する。
@@ -1056,39 +1066,14 @@ class MainWindow(QMainWindow):
         ``.bin``を書き出す（ISO作成と同様、1回の実行につき1組の
         ファイルのため）。
         """
-        dest_text = self.output_edit.text().strip()
+        dest_text = self._require_output_path("出力先フォルダ")
 
-        if not dest_text:
-            QMessageBox.warning(
-                self,
-                "入力エラー",
-                "出力先フォルダを指定してください。",
-            )
+        if dest_text is None:
             return
 
         missing = cdrdao.missing_tools()
 
-        if missing:
-            tools = " ".join(missing)
-            brew_packages = [
-                _BREW_PACKAGES[tool]
-                for tool in missing
-                if tool in _BREW_PACKAGES
-            ]
-
-            message = f"ディスクイメージの作成には次のコマンドが必要です: {tools}"
-
-            if brew_packages:
-                message += (
-                    "\n\nHomebrewでインストールしてください:\n"
-                    f"  brew install {' '.join(brew_packages)}"
-                )
-
-            QMessageBox.critical(
-                self,
-                "外部ツールが不足しています",
-                message,
-            )
+        if not self._check_required_tools(missing, "ディスクイメージの作成"):
             return
 
         dest_path = Path(dest_text)
@@ -1100,34 +1085,24 @@ class MainWindow(QMainWindow):
         toc_path = dest_path / f"{base_name}.toc"
         bin_path = dest_path / f"{base_name}.bin"
 
-        if toc_path.exists() or bin_path.exists():
-            reply = QMessageBox.question(
-                self,
-                "確認",
-                f"{toc_path.name} / {bin_path.name} は既に存在します。"
-                "上書きしますか？",
-                QMessageBox.StandardButton.Yes
-                | QMessageBox.StandardButton.No,
-            )
-
-            if reply != QMessageBox.StandardButton.Yes:
-                return
+        if (toc_path.exists() or bin_path.exists()) and not self._confirm(
+            "確認",
+            f"{toc_path.name} / {bin_path.name} は既に存在します。"
+            "上書きしますか？",
+        ):
+            return
 
         # cdrdaoはファイルシステム層を経由せずSCSI/MMCコマンドで直接
         # ドライブへアクセスするため、macOSがボリュームをマウントした
         # ままだと排他アクセスできない（実機で確認済み）。ディスクの
         # アンマウントはユーザーの許可なく自動実行しない
         # （AGENTS.mdの既存方針）ため、ここで確認を挟む。
-        reply = QMessageBox.question(
-            self,
+        if not self._confirm(
             "確認",
             "cdrdaoでディスクイメージを作成するには、いったんディスクを"
             "アンマウントする必要があります（取り出しは行いません。"
             "完了後に自動的に再マウントします）。続行しますか？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-
-        if reply != QMessageBox.StandardButton.Yes:
+        ):
             return
 
         media_name = get_media_name(volume.device_identifier)
@@ -1163,26 +1138,19 @@ class MainWindow(QMainWindow):
             )
             return
 
-        self._is_audio_job = True
-        self._cancel_requested = False
-        self._drive_option_note_shown = False
+        self._begin_job(
+            is_audio_job=True,
+            status_text="ディスクイメージを作成しています…",
+        )
         # cdrdaoは一時作業ディレクトリを使わないため、前回の正確な
         # リッピングで使った TemporaryDirectory を _on_finished() が
         # 誤って二重クリーンアップしないよう、明示的に None へ戻す。
         self._audio_work_tmpdir = None
         self._cdrdao_unmounted_device_identifier = volume.device_identifier
-        self.log_view.clear()
-        self.status_label.setText("ディスクイメージを作成しています…")
-        self._start_progress_indicator()
-        self._set_controls_enabled(False)
 
         worker = CdrdaoWorker(device, dest_path, base_name, parent=self)
 
-        worker.progress.connect(self._on_progress)
-        worker.finished_ok.connect(self._on_finished)
-
-        self._worker = worker
-        worker.start()
+        self._launch_worker(worker)
 
     def _start_progress_indicator(self) -> None:
         """処理開始時に進捗バーを表示する。
