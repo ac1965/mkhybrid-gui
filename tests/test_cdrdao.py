@@ -14,6 +14,7 @@ import pytest
 from mkhybrid_gui import audio_cd, cdrdao
 from mkhybrid_gui.cdrdao import (
     build_read_cd_command,
+    build_toc2cue_command,
     find_scsi_device,
     missing_tools,
     rip_disc_image,
@@ -156,6 +157,56 @@ def test_missing_tools_empty_when_present(
     assert missing_tools() == []
 
 
+def test_missing_tools_does_not_check_toc2cue_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """CUE生成をリクエストしていない場合、toc2cueの有無は確認しない。"""
+    checked: list[str] = []
+
+    def fake_which(name: str, path: str | None = None) -> str | None:
+        checked.append(name)
+        return f"/opt/homebrew/bin/{name}" if name == "cdrdao" else None
+
+    monkeypatch.setattr(audio_cd.shutil, "which", fake_which)
+    monkeypatch.setattr(
+        audio_cd, "effective_path", lambda: "/opt/homebrew/bin:/usr/bin:/bin"
+    )
+
+    assert missing_tools() == []
+    assert checked == ["cdrdao"]
+
+
+def test_missing_tools_checks_toc2cue_when_generate_cue_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(audio_cd.shutil, "which", lambda name, path=None: None)
+    monkeypatch.setattr(
+        audio_cd, "effective_path", lambda: "/opt/homebrew/bin:/usr/bin:/bin"
+    )
+
+    assert missing_tools(generate_cue=True) == ["cdrdao", "toc2cue"]
+
+
+# --- CUEシート生成（toc2cue） ----------------------------------------------
+
+
+def test_build_toc2cue_command() -> None:
+    cmd = build_toc2cue_command(
+        Path("/out/Album.toc"),
+        Path("/out/Album.cue"),
+        Path("/out/Album.cue.bin"),
+    )
+
+    assert cmd == [
+        "toc2cue",
+        "-s",
+        "-C",
+        "/out/Album.cue.bin",
+        "/out/Album.toc",
+        "/out/Album.cue",
+    ]
+
+
 # --- ディスクイメージ作成 ------------------------------------------------
 
 
@@ -192,6 +243,98 @@ def test_rip_disc_image_success(
     assert result.toc_path.exists()
     assert result.bin_path.exists()
     assert progress_lines == ["Analyzing...", "Writing..."]
+
+
+def test_rip_disc_image_with_cue_generates_cue_and_swapped_bin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class _FakePopen:
+        def __init__(self, cmd, **kwargs):
+            if cmd[0] == "cdrdao":
+                bin_path = Path(cmd[cmd.index("--datafile") + 1])
+                toc_path = Path(cmd[-1])
+                bin_path.write_bytes(b"fake-bin-data")
+                toc_path.write_text("CD_DA\n")
+                self.stdout = iter(["Analyzing...\n"])
+            elif cmd[0] == "toc2cue":
+                swapped_bin_path = Path(cmd[cmd.index("-C") + 1])
+                cue_path = Path(cmd[-1])
+                swapped_bin_path.write_bytes(b"fake-swapped-bin-data")
+                cue_path.write_text('FILE "fake-swapped-bin-data" BINARY\n')
+                self.stdout = iter(["Converting bin file...\n"])
+            else:
+                raise AssertionError(f"想定外のコマンド: {cmd}")
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(
+        audio_cd, "effective_path", lambda: "/opt/homebrew/bin:/usr/bin:/bin"
+    )
+
+    dest = tmp_path / "out"
+    progress_lines: list[str] = []
+
+    result = rip_disc_image(
+        "/dev/rdisk5",
+        dest,
+        "Test Album",
+        on_progress=progress_lines.append,
+        generate_cue=True,
+    )
+
+    assert result.ok is True
+    assert result.cue_error is None
+    assert result.cue_path == dest / "Test Album.cue"
+    assert result.cue_path.exists()
+    assert (dest / "Test Album.cue.bin").exists()
+    assert "CUEシートを作成しています…" in progress_lines
+
+
+def test_rip_disc_image_cue_failure_does_not_fail_whole_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CUE生成が失敗しても、TOC+BIN本体は正常に作成されていれば
+    ``DiscImageResult.ok``はTrueのままにする（ベストエフォート）。
+    """
+
+    class _FakePopen:
+        def __init__(self, cmd, **kwargs):
+            if cmd[0] == "cdrdao":
+                bin_path = Path(cmd[cmd.index("--datafile") + 1])
+                toc_path = Path(cmd[-1])
+                bin_path.write_bytes(b"fake-bin-data")
+                toc_path.write_text("CD_DA\n")
+                self.stdout = iter([])
+                self._returncode = 0
+            elif cmd[0] == "toc2cue":
+                self.stdout = iter(["ERROR: something went wrong\n"])
+                self._returncode = 1
+            else:
+                raise AssertionError(f"想定外のコマンド: {cmd}")
+
+        def wait(self) -> int:
+            return self._returncode
+
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(
+        audio_cd, "effective_path", lambda: "/opt/homebrew/bin:/usr/bin:/bin"
+    )
+
+    dest = tmp_path / "out"
+
+    result = rip_disc_image(
+        "/dev/rdisk5", dest, "Test Album", generate_cue=True
+    )
+
+    assert result.ok is True
+    assert result.toc_path.exists()
+    assert result.bin_path.exists()
+    assert result.cue_path is None
+    assert "something went wrong" in result.cue_error
+    assert not (dest / "Test Album.cue").exists()
+    assert not (dest / "Test Album.cue.bin").exists()
 
 
 def test_rip_disc_image_failure_removes_partial_files(
@@ -285,3 +428,43 @@ def test_cdrdao_worker_emits_success_message(
 
     assert results[0][0] is True
     assert "My Album.toc" in results[0][1]
+
+
+def test_cdrdao_worker_reports_cue_path_when_generate_cue_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, qtbot
+) -> None:
+    class _FakePopen:
+        def __init__(self, cmd, **kwargs):
+            if cmd[0] == "cdrdao":
+                bin_path = Path(cmd[cmd.index("--datafile") + 1])
+                toc_path = Path(cmd[-1])
+                bin_path.write_bytes(b"fake")
+                toc_path.write_text("CD_DA\n")
+            elif cmd[0] == "toc2cue":
+                swapped_bin_path = Path(cmd[cmd.index("-C") + 1])
+                cue_path = Path(cmd[-1])
+                swapped_bin_path.write_bytes(b"fake-swapped")
+                cue_path.write_text("FILE ...\n")
+            self.stdout = iter([])
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(
+        audio_cd, "effective_path", lambda: "/opt/homebrew/bin:/usr/bin:/bin"
+    )
+
+    worker = cdrdao.CdrdaoWorker(
+        "/dev/rdisk5", tmp_path / "out", "My Album", generate_cue=True
+    )
+
+    results: list[tuple[bool, str]] = []
+    worker.finished_ok.connect(lambda ok, message: results.append((ok, message)))
+
+    with qtbot.waitSignal(worker.finished_ok, timeout=2000):
+        worker.start()
+
+    assert results[0][0] is True
+    assert "My Album.toc" in results[0][1]
+    assert "My Album.cue" in results[0][1]

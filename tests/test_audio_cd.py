@@ -17,6 +17,7 @@ from mkhybrid_gui.accuraterip import AccurateRipLookupResult, AccurateRipTrackEn
 from mkhybrid_gui.audio_cd import (
     AudioCdError,
     AudioFormat,
+    AudioRipWorker,
     DiscToc,
     RipCancelled,
     RipTrackResult,
@@ -1399,12 +1400,14 @@ def test_rip_and_convert_disc_confirms_middle_track_via_accuraterip(
 
     dest = tmp_path / "out"
     work = tmp_path / "work"
+    progress_lines: list[str] = []
 
     result = rip_and_convert_disc(
         "/dev/rdisk4",
         dest,
         AudioFormat.WAV,
         work,
+        on_progress=progress_lines.append,
         verify=True,
         accuraterip_search_range=search_range,
     )
@@ -1416,9 +1419,189 @@ def test_rip_and_convert_disc_confirms_middle_track_via_accuraterip(
     assert outcomes[2].accuraterip_confidence == 17
     assert result.accuraterip_confirmed_tracks == [2]
 
+    # トラックごとの照合結果がリアルタイムでprogressに流れること
+    # （完了メッセージだけでなく、処理中にも詳細が分かるようにするため）。
+    assert any(
+        "トラック2" in line and "confidence=17" in line
+        for line in progress_lines
+    )
+
     # AccurateRip照合のために保持していた一時WAVは、最終的に
     # すべて削除されていること（ディスク容量を無駄に消費しない）。
     assert list(work.glob("*.wav")) == []
+
+
+def test_audio_rip_worker_lists_confirmed_tracks_in_completion_message(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    qtbot,
+) -> None:
+    """完了メッセージに、確認できた曲数だけでなくトラック番号の一覧も
+    含まれることを検証する（``AudioRipWorker.run()``が組み立てる文言）。
+    """
+    track_frame_counts = {1: 30, 2: 200, 3: 30}
+
+    def fake_run(cmd, **kwargs):
+        class FakeCompletedProcess:
+            returncode = 0
+            stdout = SAMPLE_QUERY_OUTPUT
+            stderr = ""
+
+        return FakeCompletedProcess()
+
+    class _FakeAccurateRipPopen:
+        def __init__(self, cmd, **kwargs):
+            track_number = int(cmd[-2])
+            output_path = Path(cmd[-1])
+            _build_wav_with_stereo_samples(
+                output_path,
+                _track_samples(
+                    track_number, track_frame_counts[track_number]
+                ),
+            )
+            self.stdout = iter([])
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", _FakeAccurateRipPopen)
+    monkeypatch.setattr(
+        audio_cd,
+        "effective_path",
+        lambda: "/opt/homebrew/bin:/usr/bin:/bin",
+    )
+
+    search_range = 10
+    pad_frames = search_range + 5
+    leading = _combined_track_values(1, track_frame_counts[1])[
+        -pad_frames:
+    ]
+    this_samples = _combined_track_values(2, track_frame_counts[2])
+    trailing = _combined_track_values(3, track_frame_counts[3])[
+        :pad_frames
+    ]
+    padded = leading + this_samples + trailing
+    target_crc_v1 = _brute_v1(padded, len(leading) + 2, len(this_samples))
+
+    fake_lookup_result = AccurateRipLookupResult(
+        tracks={
+            2: [
+                AccurateRipTrackEntry(
+                    confidence=17, crc_v1=target_crc_v1, crc_v2=0
+                )
+            ]
+        }
+    )
+    monkeypatch.setattr(
+        audio_cd.accuraterip,
+        "lookup",
+        lambda track_count, ids, **kwargs: fake_lookup_result,
+    )
+
+    worker = AudioRipWorker(
+        "/dev/rdisk4",
+        tmp_path / "out",
+        AudioFormat.WAV,
+        tmp_path / "work",
+        verify=True,
+        accuraterip_search_range=search_range,
+        parent=None,
+    )
+
+    results: list[tuple[bool, str]] = []
+    worker.finished_ok.connect(
+        lambda ok, message: results.append((ok, message))
+    )
+
+    with qtbot.waitSignal(worker.finished_ok, timeout=5000):
+        worker.start()
+
+    assert results[0][0] is True
+    assert "AccurateRipで1/3曲が確認されました" in results[0][1]
+    assert "トラック2" in results[0][1]
+
+
+def test_rip_and_convert_disc_reports_no_match_when_offset_search_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """投稿は見つかったが探索範囲内で一致するオフセットが無い場合、
+    「照合はできませんでした」というトラック別の進捗メッセージを出し、
+    accuraterip_confidenceはNoneのままにする（「不一致」ではなく
+    「未実施/未確認」として扱う）。
+    """
+    track_frame_counts = {1: 30, 2: 200, 3: 30}
+
+    def fake_run(cmd, **kwargs):
+        class FakeCompletedProcess:
+            returncode = 0
+            stdout = SAMPLE_QUERY_OUTPUT
+            stderr = ""
+
+        return FakeCompletedProcess()
+
+    class _FakeAccurateRipPopen:
+        def __init__(self, cmd, **kwargs):
+            track_number = int(cmd[-2])
+            output_path = Path(cmd[-1])
+            _build_wav_with_stereo_samples(
+                output_path,
+                _track_samples(
+                    track_number, track_frame_counts[track_number]
+                ),
+            )
+            self.stdout = iter([])
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", _FakeAccurateRipPopen)
+    monkeypatch.setattr(
+        audio_cd,
+        "effective_path",
+        lambda: "/opt/homebrew/bin:/usr/bin:/bin",
+    )
+
+    # 実在しないCRCを投稿として仕込み、探索範囲内で絶対に一致しないようにする。
+    fake_lookup_result = AccurateRipLookupResult(
+        tracks={
+            2: [
+                AccurateRipTrackEntry(
+                    confidence=5, crc_v1=0xDEADBEEF, crc_v2=0
+                )
+            ]
+        }
+    )
+    monkeypatch.setattr(
+        audio_cd.accuraterip,
+        "lookup",
+        lambda track_count, ids, **kwargs: fake_lookup_result,
+    )
+
+    dest = tmp_path / "out"
+    work = tmp_path / "work"
+    progress_lines: list[str] = []
+
+    result = rip_and_convert_disc(
+        "/dev/rdisk4",
+        dest,
+        AudioFormat.WAV,
+        work,
+        on_progress=progress_lines.append,
+        verify=True,
+        accuraterip_search_range=10,
+    )
+
+    assert result.ok is True
+    outcomes = {t.track_number: t for t in result.tracks}
+    assert outcomes[2].accuraterip_confidence is None
+    assert result.accuraterip_confirmed_tracks == []
+    assert any(
+        "トラック2" in line and "照合はできませんでした" in line
+        for line in progress_lines
+    )
 
 
 def test_rip_and_convert_disc_skips_accuraterip_when_lookup_finds_nothing(

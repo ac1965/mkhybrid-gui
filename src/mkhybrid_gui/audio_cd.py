@@ -1006,6 +1006,9 @@ def rip_and_convert_disc(
                     # トリミング規則が実データで未確認のため対象外
                     # （docs/design/accuraterip.md 4.2節を参照）。
                     if lookup_result.ok and lookup_result.tracks:
+                        if on_progress is not None:
+                            on_progress("AccurateRipに照合しています…")
+
                         pad_frames = accuraterip_search_range + 100
 
                         for target_track in range(
@@ -1027,6 +1030,11 @@ def rip_and_convert_disc(
                             if not candidates or not (
                                 prev_wav and this_wav and next_wav
                             ):
+                                if on_progress is not None and not candidates:
+                                    on_progress(
+                                        f"トラック{target_track}: "
+                                        "AccurateRipに投稿がありません。"
+                                    )
                                 continue
 
                             leading = read_pcm_samples(prev_wav)[
@@ -1049,6 +1057,19 @@ def rip_and_convert_disc(
                             if match is not None:
                                 accuraterip_confidences[target_track] = (
                                     match.confidence
+                                )
+
+                                if on_progress is not None:
+                                    on_progress(
+                                        f"トラック{target_track}: "
+                                        "AccurateRipで確認されました"
+                                        f"（confidence={match.confidence}、"
+                                        f"オフセット{match.offset:+d}）。"
+                                    )
+                            elif on_progress is not None:
+                                on_progress(
+                                    f"トラック{target_track}: "
+                                    "AccurateRipでの照合はできませんでした。"
                                 )
                 except Exception:  # noqa: BLE001
                     # ディスク未登録・ネットワークエラー・WAV読み込みの
@@ -1104,6 +1125,7 @@ if QThread is not None:
             album_metadata: AlbumMetadata | None = None,
             fallback_folder_name: str | None = None,
             disc_toc: DiscToc | None = None,
+            accuraterip_search_range: int = get_config().accuraterip.search_range_samples,
             parent=None,
         ) -> None:
             super().__init__(parent)
@@ -1113,6 +1135,7 @@ if QThread is not None:
             self._work_dir = work_dir
             self._verify = verify
             self._album_metadata = album_metadata
+            self._accuraterip_search_range = accuraterip_search_range
             self._fallback_folder_name = fallback_folder_name
             self._disc_toc = disc_toc
             self._process: subprocess.Popen[str] | None = None
@@ -1153,6 +1176,7 @@ if QThread is not None:
                     album_metadata=self._album_metadata,
                     fallback_folder_name=self._fallback_folder_name,
                     disc_toc=self._disc_toc,
+                    accuraterip_search_range=self._accuraterip_search_range,
                 )
             except AudioCdError as exc:
                 self.finished_ok.emit(False, str(exc))
@@ -1192,10 +1216,15 @@ if QThread is not None:
                 )
 
             if self._verify and result.accuraterip_confirmed_tracks:
+                confirmed = "、".join(
+                    str(number)
+                    for number in result.accuraterip_confirmed_tracks
+                )
                 message += (
                     f"（AccurateRipで"
                     f"{len(result.accuraterip_confirmed_tracks)}/"
-                    f"{len(result.tracks)}曲が確認されました）"
+                    f"{len(result.tracks)}曲が確認されました: "
+                    f"トラック{confirmed}）"
                 )
 
             self.finished_ok.emit(True, message)

@@ -154,6 +154,17 @@ class MainWindow(QMainWindow):
         self.audio_mode_label = QLabel("音楽CDの書き出し方法:")
         form.addRow(self.audio_mode_label, audio_mode_row)
 
+        cdrdao_options_row = QHBoxLayout()
+        self.cdrdao_generate_cue_checkbox = QCheckBox(
+            "CUEシートも生成する（互換性用。バイトスワップ済みBINを"
+            "追加作成するため、ディスク使用量が倍になります）"
+        )
+        self.cdrdao_generate_cue_checkbox.setChecked(False)
+        cdrdao_options_row.addWidget(self.cdrdao_generate_cue_checkbox)
+        cdrdao_options_row.addStretch(1)
+        self.cdrdao_options_label = QLabel("cdrdaoのオプション:")
+        form.addRow(self.cdrdao_options_label, cdrdao_options_row)
+
         output_row = QHBoxLayout()
         self.output_edit = QLineEdit()
         self.output_browse_button = QPushButton("参照…")
@@ -416,6 +427,10 @@ class MainWindow(QMainWindow):
         else:
             self.audio_mode_accurate_radio.setChecked(True)
 
+        self.cdrdao_generate_cue_checkbox.setChecked(
+            app_config.ui.cdrdao_generate_cue
+        )
+
         self.cd_max_size_spin.setValue(
             max(1, app_config.media_size.cd_max_bytes // self._BYTES_PER_MB)
         )
@@ -453,6 +468,7 @@ class MainWindow(QMainWindow):
                 if self._is_cdrdao_mode_selected()
                 else "ACCURATE"
             ),
+            cdrdao_generate_cue=self.cdrdao_generate_cue_checkbox.isChecked(),
         )
 
         return config.AppConfig(
@@ -641,6 +657,9 @@ class MainWindow(QMainWindow):
         self.metadata_privacy_label.setVisible(is_audio)
         self.metadata_status_label.setVisible(is_audio)
         self.track_title_table.setVisible(accurate_visible)
+
+        self.cdrdao_options_label.setVisible(is_cdrdao)
+        self.cdrdao_generate_cue_checkbox.setVisible(is_cdrdao)
 
         if is_cdrdao:
             self.start_button.setText("ディスクイメージを作成")
@@ -1052,6 +1071,7 @@ class MainWindow(QMainWindow):
             album_metadata=album_metadata,
             fallback_folder_name=fallback_folder_name,
             disc_toc=self._disc_toc,
+            accuraterip_search_range=self.accuraterip_search_range_spin.value(),
             parent=self,
         )
 
@@ -1071,7 +1091,8 @@ class MainWindow(QMainWindow):
         if dest_text is None:
             return
 
-        missing = cdrdao.missing_tools()
+        generate_cue = self.cdrdao_generate_cue_checkbox.isChecked()
+        missing = cdrdao.missing_tools(generate_cue=generate_cue)
 
         if not self._check_required_tools(missing, "ディスクイメージの作成"):
             return
@@ -1084,11 +1105,19 @@ class MainWindow(QMainWindow):
 
         toc_path = dest_path / f"{base_name}.toc"
         bin_path = dest_path / f"{base_name}.bin"
+        existing_paths = [toc_path, bin_path]
 
-        if (toc_path.exists() or bin_path.exists()) and not self._confirm(
+        if generate_cue:
+            existing_paths += [
+                dest_path / f"{base_name}.cue",
+                dest_path / f"{base_name}.cue.bin",
+            ]
+
+        if any(p.exists() for p in existing_paths) and not self._confirm(
             "確認",
-            f"{toc_path.name} / {bin_path.name} は既に存在します。"
-            "上書きしますか？",
+            "既存のファイル（"
+            + " / ".join(p.name for p in existing_paths if p.exists())
+            + "）は既に存在します。上書きしますか？",
         ):
             return
 
@@ -1148,7 +1177,13 @@ class MainWindow(QMainWindow):
         self._audio_work_tmpdir = None
         self._cdrdao_unmounted_device_identifier = volume.device_identifier
 
-        worker = CdrdaoWorker(device, dest_path, base_name, parent=self)
+        worker = CdrdaoWorker(
+            device,
+            dest_path,
+            base_name,
+            generate_cue=generate_cue,
+            parent=self,
+        )
 
         self._launch_worker(worker)
 
@@ -1185,6 +1220,7 @@ class MainWindow(QMainWindow):
         self.udf_checkbox.setEnabled(enabled)
         self.audio_mode_accurate_radio.setEnabled(enabled)
         self.audio_mode_cdrdao_radio.setEnabled(enabled)
+        self.cdrdao_generate_cue_checkbox.setEnabled(enabled)
 
         for radio in self._audio_format_buttons.values():
             radio.setEnabled(enabled)

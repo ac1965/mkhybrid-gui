@@ -121,7 +121,39 @@ flowchart TD
 | 所要時間 | 約13分 |
 | 検証 | 生成された`.bin`のサイズが、diskutilの報告するディスクの実サイズ（563,579,184バイト）と完全一致 |
 
-## 8. 既知の制限
+## 8. CUEシート生成（オプトイン、互換性用）
+
+TOC+BINはcdrdao独自形式で、他の汎用ツールでの互換性がやや低い。
+「CUEシートも生成する」チェックボックス（既定OFF）をONにすると、
+TOC+BIN作成の成功後、`toc2cue`（`cdrdao`と同じHomebrewフォーミュラに
+同梱）で標準的な`.cue`シートを追加生成する。
+
+```mermaid
+flowchart TD
+    A["cdrdao read-cdでTOC+BIN作成"] --> B{"CUEシート生成が<br/>ONになっている?"}
+    B -->|No| Z["完了（TOC+BINのみ）"]
+    B -->|Yes| C["toc2cue -s -C {base}.cue.bin<br/>{base}.toc {base}.cue"]
+    C --> D{"成功?"}
+    D -->|Yes| E["完了（TOC+BIN+CUE+専用BIN）"]
+    D -->|No| F["TOC+BIN本体は成功のまま、<br/>cue_errorに理由を記録"]
+```
+
+### なぜ専用のバイトスワップ済みBINを別途作るのか（実機で確認済み）
+
+`toc2cue`をオプション無しで実行すると、生成された`.cue`は既存のTOC用
+`.bin`をそのまま参照するが、音楽トラックを含む場合は**バイト順が
+正しくない**と`toc2cue`自身が警告する（実際に生成させて確認済み）。
+そのため`-s`（バイトスワップ）+`-C <出力先>`（新規bin作成）を指定し、
+CUE専用の`{base_name}.cue.bin`を別途生成する。
+
+| 項目 | 内容 |
+| --- | --- |
+| 実行コマンド | `toc2cue -s -C {base_name}.cue.bin {base_name}.toc {base_name}.cue` |
+| 追加ディスク使用量 | ディスクイメージ全体のサイズぶん（既存のTOC用BINと同サイズ）が追加される。**既定でOFF**にしているのはこのため |
+| 失敗時の扱い | TOC+BIN本体の成功を覆さない（ベストエフォート）。`DiscImageResult.cue_error`に理由を残し、完了メッセージで案内する |
+| 外部ツールチェック | `cdrdao.missing_tools(generate_cue=True)`で`toc2cue`の有無も確認する（CUE生成をリクエストしない場合は確認しない） |
+
+## 9. 既知の制限
 
 | 項目 | 内容 |
 | --- | --- |

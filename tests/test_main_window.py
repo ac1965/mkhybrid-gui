@@ -227,6 +227,25 @@ def test_selecting_cdrdao_mode_hides_accurate_rip_widgets(
     for radio in window._audio_format_buttons.values():
         assert radio.isVisible() is False
     assert window.start_button.text() == "ディスクイメージを作成"
+    assert window.cdrdao_generate_cue_checkbox.isVisible() is True
+
+
+def test_selecting_accurate_mode_hides_cdrdao_cue_checkbox(
+    qtbot,
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        main_window_module,
+        "query_disc_toc",
+        lambda device: DiscToc(track_offsets=[0, 1000], leadout_offset=2000),
+    )
+
+    window.show()
+    _select_volume(window, _audio_volume())
+
+    assert window.audio_mode_accurate_radio.isChecked() is True
+    assert window.cdrdao_generate_cue_checkbox.isVisible() is False
 
 
 def test_selecting_audio_cd_prefills_output_folder_from_last_directory(
@@ -453,6 +472,58 @@ def test_start_audio_rip_warns_on_missing_tools(
     assert window._worker is None
 
 
+def test_start_audio_rip_passes_search_range_spinbox_value_to_worker(
+    qtbot,
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """設定タブの「AccurateRipのオフセット探索範囲」スピンボックスの値が、
+    実際に``AudioRipWorker``へ伝わることを確認する。
+
+    以前はこのスピンボックスの値がconfig保存にしか使われず、実際の
+    リッピング時には反映されない回帰があった（``AudioRipWorker``が
+    ``accuraterip_search_range``を受け取らず、常にインポート時点の
+    既定値が使われていた）。
+    """
+    monkeypatch.setattr(
+        main_window_module,
+        "query_disc_toc",
+        lambda device: DiscToc(track_offsets=[0], leadout_offset=1000),
+    )
+    monkeypatch.setattr(
+        main_window_module, "missing_tools", lambda fmt: []
+    )
+
+    captured: dict = {}
+
+    class _FakeAudioRipWorker:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+            self.progress = _FakeSignal()
+            self.progress_percent = _FakeSignal()
+            self.finished_ok = _FakeSignal()
+
+        def isRunning(self) -> bool:  # noqa: N802 - Qtの命名規則に合わせる
+            return False
+
+        def start(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        main_window_module, "AudioRipWorker", _FakeAudioRipWorker
+    )
+
+    window.show()
+    _select_volume(window, _audio_volume())
+    window.output_edit.setText(str(tmp_path / "out"))
+    window.accuraterip_search_range_spin.setValue(4242)
+
+    window._on_start_clicked()
+
+    assert captured["accuraterip_search_range"] == 4242
+
+
 def test_start_cdrdao_rip_warns_on_empty_output_path(
     qtbot,
     window: MainWindow,
@@ -489,7 +560,7 @@ def test_start_cdrdao_rip_warns_on_missing_tools(
         lambda device: DiscToc(track_offsets=[0], leadout_offset=1000),
     )
     monkeypatch.setattr(
-        main_window_module.cdrdao, "missing_tools", lambda: ["cdrdao"]
+        main_window_module.cdrdao, "missing_tools", lambda **kwargs: ["cdrdao"]
     )
 
     window.show()
@@ -516,7 +587,7 @@ def test_start_cdrdao_rip_uses_album_name_for_base_filename(
         lambda device: DiscToc(track_offsets=[0], leadout_offset=1000),
     )
     monkeypatch.setattr(
-        main_window_module.cdrdao, "missing_tools", lambda: []
+        main_window_module.cdrdao, "missing_tools", lambda **kwargs: []
     )
     monkeypatch.setattr(
         main_window_module, "get_media_name", lambda device_id: "TEST DRIVE"
@@ -539,7 +610,7 @@ def test_start_cdrdao_rip_uses_album_name_for_base_filename(
     captured: dict = {}
 
     class _FakeCdrdaoWorker:
-        def __init__(self, device, destination_dir, base_name, parent=None):
+        def __init__(self, device, destination_dir, base_name, generate_cue=False, parent=None):
             captured["device"] = device
             captured["destination_dir"] = destination_dir
             captured["base_name"] = base_name
@@ -568,20 +639,28 @@ def test_start_cdrdao_rip_uses_album_name_for_base_filename(
     assert captured.get("started") is True
 
 
-def test_start_cdrdao_rip_falls_back_to_volume_name_without_album(
+def test_start_cdrdao_rip_passes_generate_cue_to_missing_tools_and_worker(
     qtbot,
     window: MainWindow,
     monkeypatch: pytest.MonkeyPatch,
     _no_modal_dialogs: list,
     tmp_path: Path,
 ) -> None:
+    """「CUEシートも生成する」チェックボックスがONの場合、
+    ``cdrdao.missing_tools``と``CdrdaoWorker``の両方に
+    ``generate_cue=True``が伝わることを確認する。
+    """
     monkeypatch.setattr(
         main_window_module,
         "query_disc_toc",
         lambda device: DiscToc(track_offsets=[0], leadout_offset=1000),
     )
+
+    missing_tools_calls: list[dict] = []
     monkeypatch.setattr(
-        main_window_module.cdrdao, "missing_tools", lambda: []
+        main_window_module.cdrdao,
+        "missing_tools",
+        lambda **kwargs: missing_tools_calls.append(kwargs) or [],
     )
     monkeypatch.setattr(
         main_window_module, "get_media_name", lambda device_id: "TEST DRIVE"
@@ -604,7 +683,77 @@ def test_start_cdrdao_rip_falls_back_to_volume_name_without_album(
     captured: dict = {}
 
     class _FakeCdrdaoWorker:
-        def __init__(self, device, destination_dir, base_name, parent=None):
+        def __init__(
+            self,
+            device,
+            destination_dir,
+            base_name,
+            generate_cue=False,
+            parent=None,
+        ):
+            captured["generate_cue"] = generate_cue
+            self.progress = _FakeSignal()
+            self.finished_ok = _FakeSignal()
+
+        def isRunning(self) -> bool:  # noqa: N802 - Qtの命名規則に合わせる
+            return False
+
+        def start(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        main_window_module, "CdrdaoWorker", _FakeCdrdaoWorker
+    )
+
+    window.show()
+    _select_volume(window, _audio_volume())
+    window.audio_mode_cdrdao_radio.setChecked(True)
+    window.cdrdao_generate_cue_checkbox.setChecked(True)
+    window.output_edit.setText(str(tmp_path / "out"))
+
+    window._on_start_clicked()
+
+    assert missing_tools_calls == [{"generate_cue": True}]
+    assert captured["generate_cue"] is True
+
+
+def test_start_cdrdao_rip_falls_back_to_volume_name_without_album(
+    qtbot,
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+    _no_modal_dialogs: list,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        main_window_module,
+        "query_disc_toc",
+        lambda device: DiscToc(track_offsets=[0], leadout_offset=1000),
+    )
+    monkeypatch.setattr(
+        main_window_module.cdrdao, "missing_tools", lambda **kwargs: []
+    )
+    monkeypatch.setattr(
+        main_window_module, "get_media_name", lambda device_id: "TEST DRIVE"
+    )
+    monkeypatch.setattr(
+        main_window_module, "unmount_disk", lambda device_id: True
+    )
+    monkeypatch.setattr(
+        main_window_module, "mount_disk", lambda device_id: True
+    )
+    monkeypatch.setattr(
+        main_window_module.cdrdao, "scan_bus", lambda: "fake scanbus output"
+    )
+    monkeypatch.setattr(
+        main_window_module.cdrdao,
+        "find_scsi_device",
+        lambda output, media_name: "IOService:/fake/path",
+    )
+
+    captured: dict = {}
+
+    class _FakeCdrdaoWorker:
+        def __init__(self, device, destination_dir, base_name, generate_cue=False, parent=None):
             captured["base_name"] = base_name
             self.progress = _FakeSignal()
             self.finished_ok = _FakeSignal()
@@ -642,7 +791,7 @@ def test_start_cdrdao_rip_asks_before_overwriting_existing_files(
         lambda device: DiscToc(track_offsets=[0], leadout_offset=1000),
     )
     monkeypatch.setattr(
-        main_window_module.cdrdao, "missing_tools", lambda: []
+        main_window_module.cdrdao, "missing_tools", lambda **kwargs: []
     )
     monkeypatch.setattr(
         main_window_module, "CdrdaoWorker", lambda *a, **k: None
@@ -687,7 +836,7 @@ def test_start_cdrdao_rip_declines_unmount_confirmation(
         lambda device: DiscToc(track_offsets=[0], leadout_offset=1000),
     )
     monkeypatch.setattr(
-        main_window_module.cdrdao, "missing_tools", lambda: []
+        main_window_module.cdrdao, "missing_tools", lambda **kwargs: []
     )
     monkeypatch.setattr(
         main_window_module, "CdrdaoWorker", lambda *a, **k: None
@@ -733,7 +882,7 @@ def test_start_cdrdao_rip_shows_error_when_media_name_unavailable(
         lambda device: DiscToc(track_offsets=[0], leadout_offset=1000),
     )
     monkeypatch.setattr(
-        main_window_module.cdrdao, "missing_tools", lambda: []
+        main_window_module.cdrdao, "missing_tools", lambda **kwargs: []
     )
     monkeypatch.setattr(
         main_window_module, "get_media_name", lambda device_id: None
@@ -771,7 +920,7 @@ def test_start_cdrdao_rip_shows_error_when_unmount_fails(
         lambda device: DiscToc(track_offsets=[0], leadout_offset=1000),
     )
     monkeypatch.setattr(
-        main_window_module.cdrdao, "missing_tools", lambda: []
+        main_window_module.cdrdao, "missing_tools", lambda **kwargs: []
     )
     monkeypatch.setattr(
         main_window_module, "get_media_name", lambda device_id: "TEST DRIVE"
@@ -810,7 +959,7 @@ def test_start_cdrdao_rip_remounts_when_device_not_found(
         lambda device: DiscToc(track_offsets=[0], leadout_offset=1000),
     )
     monkeypatch.setattr(
-        main_window_module.cdrdao, "missing_tools", lambda: []
+        main_window_module.cdrdao, "missing_tools", lambda **kwargs: []
     )
     monkeypatch.setattr(
         main_window_module, "get_media_name", lambda device_id: "TEST DRIVE"
@@ -865,7 +1014,7 @@ def test_on_finished_remounts_disk_after_cdrdao_job(
         lambda device: DiscToc(track_offsets=[0], leadout_offset=1000),
     )
     monkeypatch.setattr(
-        main_window_module.cdrdao, "missing_tools", lambda: []
+        main_window_module.cdrdao, "missing_tools", lambda **kwargs: []
     )
     monkeypatch.setattr(
         main_window_module, "get_media_name", lambda device_id: "TEST DRIVE"
@@ -890,7 +1039,7 @@ def test_on_finished_remounts_disk_after_cdrdao_job(
     )
 
     class _FakeCdrdaoWorker:
-        def __init__(self, device, destination_dir, base_name, parent=None):
+        def __init__(self, device, destination_dir, base_name, generate_cue=False, parent=None):
             self.progress = _FakeSignal()
             self.finished_ok = _FakeSignal()
 
@@ -1186,6 +1335,7 @@ def test_construction_applies_saved_ui_preferences(
                 verify=False,
                 audio_format="FLAC",
                 audio_rip_mode="CDRDAO_IMAGE",
+                cdrdao_generate_cue=True,
             )
         )
     )
@@ -1200,6 +1350,7 @@ def test_construction_applies_saved_ui_preferences(
     assert w._audio_format_buttons[AudioFormat.FLAC].isChecked() is True
     assert w._last_output_directory == "/Volumes/Backup"
     assert w.audio_mode_cdrdao_radio.isChecked() is True
+    assert w.cdrdao_generate_cue_checkbox.isChecked() is True
 
 
 def test_construction_falls_back_to_alac_for_unknown_saved_format(
@@ -1229,6 +1380,7 @@ def test_close_event_saves_current_ui_preferences(
     window._audio_format_buttons[AudioFormat.FLAC].setChecked(True)
     window._last_output_directory = "/tmp/my-output"
     window.audio_mode_cdrdao_radio.setChecked(True)
+    window.cdrdao_generate_cue_checkbox.setChecked(True)
 
     window.closeEvent(QCloseEvent())
 
@@ -1240,6 +1392,7 @@ def test_close_event_saves_current_ui_preferences(
     assert saved.audio_format == "FLAC"
     assert saved.last_output_directory == "/tmp/my-output"
     assert saved.audio_rip_mode == "CDRDAO_IMAGE"
+    assert saved.cdrdao_generate_cue is True
 
 
 def test_close_event_while_worker_running_does_not_save_preferences(

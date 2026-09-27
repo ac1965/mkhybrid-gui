@@ -44,11 +44,19 @@ ProcessStartedCallback = Callable[["subprocess.Popen[str]"], None]
 CancelCheck = Callable[[], bool]
 
 REQUIRED_TOOLS: tuple[str, ...] = ("cdrdao",)
+#: CUEシート生成（オプトイン）にのみ必要な追加コマンド。
+#: ``cdrdao``と同じHomebrewフォーミュラに同梱されている。
+CUE_REQUIRED_TOOLS: tuple[str, ...] = ("toc2cue",)
 
 
-def missing_tools() -> list[str]:
-    """未インストールの外部コマンドを返す（現状は``cdrdao``のみ）。"""
-    return [tool for tool in REQUIRED_TOOLS if tool_path(tool) is None]
+def missing_tools(*, generate_cue: bool = False) -> list[str]:
+    """未インストールの外部コマンドを返す。
+
+    ``generate_cue``がTrueの場合のみ、CUEシート生成に使う``toc2cue``の
+    有無も確認する（既定のTOC+BIN作成のみなら不要なため）。
+    """
+    tools = REQUIRED_TOOLS + (CUE_REQUIRED_TOOLS if generate_cue else ())
+    return [tool for tool in tools if tool_path(tool) is None]
 
 
 @dataclass(frozen=True)
@@ -179,6 +187,41 @@ def build_read_cd_command(
     ]
 
 
+def build_toc2cue_command(
+    toc_path: Path, cue_path: Path, swapped_bin_path: Path
+) -> list[str]:
+    """TOC+BINから互換性用のCUEシートを作る``toc2cue``コマンドを組み立てる。
+
+    実機で確認済み: 音楽トラックを含むイメージでは、TOC用の``.bin``を
+    そのままCUEから参照すると、``toc2cue``自身が「音声のバイト順が
+    正しくない可能性がある」と警告する。``-s``（バイトスワップ）と
+    ``-C``（新規bin出力先）を指定し、CUE専用のバイトスワップ済み
+    ``.bin``を別途生成する（ディスク使用量が倍になる。GUI側で
+    オプトインのチェックボックスとして開示すること）。
+    """
+    return [
+        "toc2cue",
+        "-s",
+        "-C",
+        str(swapped_bin_path),
+        str(toc_path),
+        str(cue_path),
+    ]
+
+
+def generate_cue_sheet(
+    toc_path: Path,
+    cue_path: Path,
+    swapped_bin_path: Path,
+    on_progress: ProgressCallback | None = None,
+) -> CommandResult:
+    """``toc2cue``でCUEシート（+バイトスワップ済みBIN）を生成する。"""
+    return _run_streaming(
+        build_toc2cue_command(toc_path, cue_path, swapped_bin_path),
+        on_progress,
+    )
+
+
 @dataclass(frozen=True)
 class DiscImageResult:
     """ディスクイメージ作成の結果。"""
@@ -188,6 +231,12 @@ class DiscImageResult:
     bin_path: Path
     cancelled: bool = False
     error: str = ""
+    #: CUEシートを生成できた場合のパス（生成しなかった・失敗した場合はNone）。
+    cue_path: Path | None = None
+    #: CUEシート生成に失敗した場合のエラーメッセージ。TOC+BIN本体の
+    #: 作成自体は成功しているため、この失敗だけで``ok``をFalseにはしない
+    #: （ベストエフォート、musicbrainzのオンライン検索と同じ方針）。
+    cue_error: str | None = None
 
 
 def rip_disc_image(
@@ -197,6 +246,7 @@ def rip_disc_image(
     on_progress: ProgressCallback | None = None,
     on_process_started: ProcessStartedCallback | None = None,
     cancel_check: CancelCheck | None = None,
+    generate_cue: bool = False,
 ) -> DiscImageResult:
     """``device``のディスク全体を``destination_dir``直下に
     ``{base_name}.toc``/``{base_name}.bin``としてバックアップする。
@@ -205,6 +255,12 @@ def rip_disc_image(
     1組のTOC+BINファイルのみのため、ISO作成と同様に出力先フォルダ
     直下に直接書き出す）。失敗時・中断時は作成途中のファイルを
     削除する。
+
+    ``generate_cue``がTrueの場合、TOC+BIN作成成功後に``toc2cue``で
+    互換性用のCUEシート（+バイトスワップ済みBIN、
+    ``{base_name}.cue.bin``）を追加生成する。CUE生成の失敗は
+    ベストエフォートで扱い、TOC+BIN本体が正常に作成できていれば
+    ``DiscImageResult.ok``はTrueのままにする（``cue_error``に理由を残す）。
     """
     dest = Path(destination_dir)
     dest.mkdir(parents=True, exist_ok=True)
@@ -237,7 +293,32 @@ def rip_disc_image(
             error=result.output,
         )
 
-    return DiscImageResult(ok=True, toc_path=toc_path, bin_path=bin_path)
+    if not generate_cue:
+        return DiscImageResult(ok=True, toc_path=toc_path, bin_path=bin_path)
+
+    cue_path = dest / f"{base_name}.cue"
+    swapped_bin_path = dest / f"{base_name}.cue.bin"
+
+    if on_progress is not None:
+        on_progress("CUEシートを作成しています…")
+
+    cue_result = generate_cue_sheet(
+        toc_path, cue_path, swapped_bin_path, on_progress
+    )
+
+    if not cue_result.ok:
+        cue_path.unlink(missing_ok=True)
+        swapped_bin_path.unlink(missing_ok=True)
+        return DiscImageResult(
+            ok=True,
+            toc_path=toc_path,
+            bin_path=bin_path,
+            cue_error=cue_result.output,
+        )
+
+    return DiscImageResult(
+        ok=True, toc_path=toc_path, bin_path=bin_path, cue_path=cue_path
+    )
 
 
 try:
@@ -265,12 +346,14 @@ if QThread is not None:
             device: str,
             destination_dir: str | Path,
             base_name: str,
+            generate_cue: bool = False,
             parent=None,
         ) -> None:
             super().__init__(parent)
             self._device = device
             self._destination_dir = destination_dir
             self._base_name = base_name
+            self._generate_cue = generate_cue
             self._process: subprocess.Popen[str] | None = None
             self._cancel_requested = False
 
@@ -296,6 +379,7 @@ if QThread is not None:
                 on_progress=self.progress.emit,
                 on_process_started=self._capture_process,
                 cancel_check=self._is_cancelled,
+                generate_cue=self._generate_cue,
             )
 
             if result.cancelled:
@@ -312,7 +396,15 @@ if QThread is not None:
                 )
                 return
 
-            self.finished_ok.emit(
-                True,
-                f"ディスクイメージを作成しました（{result.toc_path}）。",
-            )
+            message = f"ディスクイメージを作成しました（{result.toc_path}）。"
+
+            if self._generate_cue:
+                if result.cue_path is not None:
+                    message += f"\nCUEシートも作成しました（{result.cue_path}）。"
+                else:
+                    message += (
+                        "\nCUEシートの作成には失敗しました"
+                        f"（TOC+BIN本体は正常です）: {result.cue_error}"
+                    )
+
+            self.finished_ok.emit(True, message)

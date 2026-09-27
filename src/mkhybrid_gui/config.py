@@ -102,6 +102,10 @@ class UiPreferences:
     verify: bool = True
     audio_format: str = "ALAC"
     audio_rip_mode: str = "ACCURATE"
+    #: cdrdaoディスクイメージ作成時、互換性用のCUEシート
+    #: （+バイトスワップ済みBIN、ディスク使用量が倍になる）も
+    #: 生成するかどうか。既定はOFF（オプトイン）。
+    cdrdao_generate_cue: bool = False
 
 
 @dataclass(frozen=True)
