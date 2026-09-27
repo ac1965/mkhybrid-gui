@@ -1,10 +1,10 @@
 # AccurateRip照合 設計ドキュメント
 
-このドキュメントは、[README.md](../../README.md)（利用者向けマニュアル）や
-[AGENTS.md](../../AGENTS.md)（AIコーディングエージェント向けの作業方針・
-回帰防止メモ）とは別に、AccurateRip照合機能の**設計判断とその根拠**を
-まとめたもの。実装が変わった場合は、このドキュメントも合わせて更新する
-こと（実装が先行してドキュメントが古いままにならないようにする）。
+対象モジュール: [accuraterip.py](../../src/mkhybrid_gui/accuraterip.py)、
+[audio_cd.py](../../src/mkhybrid_gui/audio_cd.py)（リッピング
+パイプラインへの統合部分）。全体像は[docs/design/README.md](README.md)を
+参照。AccurateRip照合は[正確なリッピング](audio-accurate-ripping.md)の
+「厳密な検証」チェックボックスの延長として動作する。
 
 > **実装状況**: v1のみ実装済み・テスト済み（`accuraterip.py`/`audio_cd.py`/
 > `config.py`/`ui/main_window.py`、`tests/test_accuraterip.py`ほか）。

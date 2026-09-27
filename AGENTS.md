@@ -2,7 +2,7 @@
 
 このリポジトリは、macOS上で光学ディスク（データCD/音楽CD/DVD/Blu-ray）からWindows/Linuxでも読めるISOイメージ（ISO 9660 + Joliet + Rock Ridge + 任意でUDF）を作成するための、Pythonベース GUIアプリケーションです。AIコーディングエージェントがこのプロジェクトを扱う際は、以下の方針に従ってください。
 
-複雑な機能（アルゴリズムの設計判断・実機検証の経緯・採用しなかった代替案とその理由等）については、この`AGENTS.md`とは別に`docs/design/`配下に個別の設計ドキュメントを置く（例: [docs/design/accuraterip.md](docs/design/accuraterip.md)）。該当機能に変更を加えた場合は、実装だけでなく対応する設計ドキュメントも同じ変更の中で更新し、ドキュメントが実装より古いまま放置されないようにすること。
+複雑な機能（アルゴリズムの設計判断・実機検証の経緯・採用しなかった代替案とその理由等）については、この`AGENTS.md`とは別に`docs/design/`配下に個別の設計ドキュメントを置く（対象はISO作成・音楽CD双方を含む実装全体。一覧は[docs/design/README.md](docs/design/README.md)を参照）。該当機能に変更を加えた場合は、実装だけでなく対応する設計ドキュメントも同じ変更の中で更新し、ドキュメントが実装より古いまま放置されないようにすること。
 
 ## プロジェクト概要
 
@@ -117,7 +117,7 @@ make distclean  # clean に加えて .venv も削除
 ## 主要な実装要件（機能仕様）
 
 1. **デバイス/ドライブ選択**: `diskutil list` の結果からマウント済みボリュームの一覧をGUI上に表示し、ユーザーに選択させる。各ボリュームは `diskutil info -plist` の `FilesystemType` とサイズから `MediaType`（データCD/音楽CD/DVD/BD）を推定し、選択肢のラベルに表示する（`disk_utils.detect_media_type`）。`filesystem_type` が既知の非光学ファイルシステム（`apfs`等）と判明している場合は `MediaType` を付与せず、`disk_utils.list_volumes()` はそのようなボリューム（内蔵の起動ディスク等）をGUIの選択肢から除外すること。
-2. **イメージ作成（データCD/DVD/BD）**: 選択対象に対して以下を実行する。
+2. **イメージ作成（データCD/DVD/BD）**: 詳細設計は[docs/design/iso-creation.md](docs/design/iso-creation.md)を参照。選択対象に対して以下を実行する。
    ```
    hdiutil makehybrid -iso [-joliet] [-udf] -o <出力先.iso> <デバイスorマウントポイント>
    ```
@@ -125,7 +125,7 @@ make distclean  # clean に加えて .venv も削除
    - `-joliet`・`-udf` はGUI上のチェックボックスで切り替え可能にする。
    - 「Joliet/UDFのいずれかを有効に」というGUI側のオプション検証には `rock` を含めない（上記の理由により、Rock Ridgeだけ有効な状態と全項目無効な状態は生成コマンドが同一になるため。実機で発見・修正済みの回帰、詳細は「やってはいけないこと」を参照）。
    - `-udf` はDVD/BD（BDXL・M-DISCを含む）選択時にデフォルトON（ISO9660の4GBファイルサイズ上限を回避するため）、CD選択時はデフォルトOFF。ユーザーは任意に変更できる。
-3. **音楽CDの正確なリッピング**: `MediaType.CD_AUDIO` を選択した場合、ISO作成UIの代わりに出力先フォルダ選択・書き出し形式（ALAC/AIFF/FLAC/WAV/AAC、既定はALAC）・検証チェックボックスに切り替える。以下の3要件を満たすこと。
+3. **音楽CDの正確なリッピング**: 詳細設計は[docs/design/audio-accurate-ripping.md](docs/design/audio-accurate-ripping.md)を参照。`MediaType.CD_AUDIO` を選択した場合、ISO作成UIの代わりに出力先フォルダ選択・書き出し形式（ALAC/AIFF/FLAC/WAV/AAC、既定はALAC）・検証チェックボックスに切り替える。以下の3要件を満たすこと。
    1. **正確な読み取り**: `cd-paranoia` をパラノイアモード（`-Z` を指定しない）で実行し、ジッター補正・C2エラー利用を有効にする。
    2. **誤り訂正・再読込**: 上記はcd-paranoia自体が内部で行う（再実装しない）。
    3. **検証**: 1トラックを独立して複数回（既定2回、不一致なら最大3回まで）リッピングし、WAVのSHA-256チェックサムが一致することを確認する（`audio_cd.rip_track_verified`）。一致しなければ最後の読み取りを「未検証」として採用し、完了メッセージで警告する。
@@ -150,7 +150,7 @@ make distclean  # clean に加えて .venv も削除
    - **タグ**: `mutagen` を使い、形式ごとに適切なタグへ書き込む（`audio_cd.write_metadata_tags`）。MP4(ALAC/AAC)はiTunes系アトム、FLACはVorbis Comment、WAV/AIFFはID3v2。全項目未入力（アルバム名・アーティスト名・全トラックタイトルが空）ならタグ付けをスキップする。
    - **オンライン検索**: 「オンラインで検索（MusicBrainz）」ボタン（GUI上の明示的なクリックでのみ動作、自動実行しない）で、ディスクのTOCから計算した [MusicBrainz Disc ID](https://musicbrainz.org/doc/Disc_ID_Calculation)（`audio_cd.query_disc_toc` + `audio_cd.disc_id_from_disc_toc`）を使い `musicbrainz.lookup_releases` でMusicBrainzに問い合わせる。0件・複数件・ネットワークエラーのいずれも例外を投げず `LookupResult` として返し、リッピング処理自体を止めないこと。複数候補時はユーザーに選ばせ、既に入力がある場合は上書き前に確認する。
    - MusicBrainz API利用時は、意味のある `User-Agent` を送信し、1秒1リクエストのレート制限を守ること（`musicbrainz._wait_for_rate_limit`）。
-9. **cdrdaoによるディスクイメージ（TOC+BIN）バックアップ**: 音楽CD選択時、既存の「正確なリッピング」（既定）に加え、「ディスクイメージ（cdrdao）」モードをラジオボタンで選べるようにする（`MainWindow.audio_mode_accurate_radio`/`audio_mode_cdrdao_radio`、`_on_audio_mode_changed()`）。既存のトラックごとの変換・タグ付け経路を置き換えるものではなく、データ+音声混在（mixed-mode）ディスクやコピーガード付き等の特殊なディスクのフォールバックとしても使う追加オプション。
+9. **cdrdaoによるディスクイメージ（TOC+BIN）バックアップ**: 詳細設計は[docs/design/cdrdao-disk-image.md](docs/design/cdrdao-disk-image.md)を参照。音楽CD選択時、既存の「正確なリッピング」（既定）に加え、「ディスクイメージ（cdrdao）」モードをラジオボタンで選べるようにする（`MainWindow.audio_mode_accurate_radio`/`audio_mode_cdrdao_radio`、`_on_audio_mode_changed()`）。既存のトラックごとの変換・タグ付け経路を置き換えるものではなく、データ+音声混在（mixed-mode）ディスクやコピーガード付き等の特殊なディスクのフォールバックとしても使う追加オプション。
    - cdrdaoモード選択時は、書き出し形式ラジオ・「厳密な検証」チェックボックス・アーティスト名/年入力欄・トラック名テーブル・MusicBrainz検索関連のウィジェットを隠す（トラック単位の変換・タグ付けを行わないため）。`album_edit`（アルバム名入力欄）は両モードで表示したままにする。
    - コマンドは`cdrdao read-cd --device <device> --driver generic-mmc-raw --paranoia-mode 3 --datafile <bin> <toc>`（`cdrdao.build_read_cd_command`）。`--paranoia-mode 3`は必ず指定すること（詳細は「やってはいけないこと」を参照）。
    - 出力ファイル名（`{base_name}.toc`/`.bin`）は、アルバム名入力欄（`album_edit`）の値を使い（`metadata.sanitize_filename_component`で安全な文字列に変換）、未入力の場合はディスクのボリューム名（`Volume.volume_name`、無ければ`device_identifier`）にフォールバックする（`MainWindow._start_cdrdao_rip()`）。既存の`audio_cd.rip_and_convert_disc`とは異なり、アルバム名サブフォルダは作らず、出力先フォルダ直下に直接書き出す（1回の実行につき1組のファイルのみのため、ISO作成と同じ扱い）。同名の`.toc`/`.bin`が既に存在する場合は上書き確認ダイアログを出す。
