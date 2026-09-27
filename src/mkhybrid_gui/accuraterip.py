@@ -237,3 +237,115 @@ def lookup(
         )
 
     return AccurateRipLookupResult(tracks=tracks)
+
+
+# --- CRC v1（位置重み付け合計）とドライブ読み取りオフセット探索 -------------
+#
+# 実際の音楽CD（20トラック）でトラック2を実際にcd-paranoiaでリッピングし、
+# ここで実装したv1（オフセット+6サンプル）が実際にAccurateRipサーバーへ
+# 投稿されている値と完全一致することを確認済み。
+#
+# v2（補充チェックサム）は、per-termでの64bit foldと末尾一括foldの両方を
+# 試したが実データと一致せず、正確な式を特定できなかったため実装していない
+# （意図的にv1のみ対応。当てずっぽうの式を実装しないこと）。
+#
+# この照合は、前後にトラックが存在する「中間トラック」でのみ実データ検証
+# 済み。ディスクの最初/最後のトラックに適用されるとされる端点トリミング
+# （先頭/末尾数千サンプルの除外）は実データで確認していないため、
+# 呼び出し側（``audio_cd.rip_and_convert_disc``）は先頭・最終トラックを
+# 対象外とすること。
+
+
+@dataclass(frozen=True)
+class AccurateRipMatch:
+    """オフセット探索で見つかった一致。"""
+
+    offset: int
+    confidence: int
+    crc_v1: int
+
+
+def _build_prefix_sums(samples: list[int]) -> tuple[list[int], list[int]]:
+    """``P[n] = sum(samples[0:n])``、``WP[n] = sum(samples[i]*i for i<n)``。
+
+    ``i``はサンプル列内の絶対位置（0始まり）。``_fast_v1``がこれらを
+    使って窓ごとのv1をO(1)で計算する。
+    """
+    n = len(samples)
+    prefix_sum = [0] * (n + 1)
+    prefix_weighted = [0] * (n + 1)
+    running_sum = 0
+    running_weighted = 0
+
+    for i, value in enumerate(samples):
+        running_sum += value
+        running_weighted += value * i
+        prefix_sum[i + 1] = running_sum
+        prefix_weighted[i + 1] = running_weighted
+
+    return prefix_sum, prefix_weighted
+
+
+def _fast_v1(
+    prefix_sum: list[int],
+    prefix_weighted: list[int],
+    start: int,
+    length: int,
+) -> int:
+    """``sum(samples[start+k] * (k+1) for k in range(length)) & 0xFFFFFFFF``を
+    前置和からO(1)で計算する。
+
+    乗数``(k+1)``は窓の中でのローカル位置（1始まり）であり、``start``
+    （オフセット仮説）には依存しない。これは
+    ``sum(samples[start+k]*(k+1))``
+    ``= sum(samples[start+k]*k) + sum(samples[start+k])``
+    ``= [(WP[start+length]-WP[start]) - start*(P[start+length]-P[start])]
+        + [P[start+length]-P[start]]``
+    という展開により、``P``/``WP``（絶対位置での前置和）だけから
+    導出できることを利用している（ランダムデータでの素朴なO(L)実装との
+    一致を確認済み）。
+    """
+    window_sum = prefix_sum[start + length] - prefix_sum[start]
+    weighted_by_local_index = (
+        prefix_weighted[start + length] - prefix_weighted[start]
+    ) - start * window_sum
+    return (weighted_by_local_index + window_sum) & 0xFFFFFFFF
+
+
+def search_offset_v1(
+    padded_samples: list[int],
+    track_start: int,
+    track_length: int,
+    candidates: list[AccurateRipTrackEntry],
+    search_range: int,
+) -> AccurateRipMatch | None:
+    """``padded_samples``内の``track_start``位置を基準に、
+    ``±search_range``サンプルのオフセットで``crc_v1``が一致する
+    ``candidates``（同一トラックへの投稿一覧）を探す。
+
+    ``padded_samples``は、対象トラックの前後に少なくとも
+    ``search_range``ぶんの隣接トラックのサンプルを含んでいる必要がある
+    （呼び出し側が``audio_cd.read_pcm_samples``で組み立てる）。
+
+    最初に一致したオフセットを返す（複数のcandidatesが同時に一致する
+    ことは通常想定しないが、その場合も最初の一致を優先する）。
+    範囲内に一致が無ければ``None``を返す。
+    """
+    prefix_sum, prefix_weighted = _build_prefix_sums(padded_samples)
+    targets = {entry.crc_v1: entry for entry in candidates}
+
+    for offset in range(-search_range, search_range + 1):
+        start = track_start + offset
+
+        if start < 0 or start + track_length > len(padded_samples):
+            continue
+
+        v1 = _fast_v1(prefix_sum, prefix_weighted, start, track_length)
+
+        if v1 in targets:
+            entry = targets[v1]
+            return AccurateRipMatch(
+                offset=offset, confidence=entry.confidence, crc_v1=v1
+            )
+
+    return None

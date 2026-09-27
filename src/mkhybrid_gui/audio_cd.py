@@ -28,13 +28,15 @@ GUIからの非同期実行のみ ``AudioRipWorker``（QThread）が担う。
 
 from __future__ import annotations
 
+import array
 import hashlib
 import os
 import re
 import shutil
 import subprocess
+import wave
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import lru_cache
 from pathlib import Path
@@ -45,6 +47,7 @@ import mutagen.id3
 import mutagen.mp4
 import mutagen.wave
 
+from mkhybrid_gui import accuraterip
 from mkhybrid_gui.config import get_config
 from mkhybrid_gui.metadata import (
     LEAD_IN_FRAMES,
@@ -52,6 +55,10 @@ from mkhybrid_gui.metadata import (
     compute_disc_id,
     sanitize_filename_component,
 )
+
+#: CD-DA（音楽CD）固定のPCMフォーマット。AccurateRip照合用のサンプル
+#: 読み込み（``read_pcm_samples``）が前提とする値。
+_ACCURATERIP_SAMPLE_RATE = 44100
 
 ProgressCallback = Callable[[str], None]
 ProgressPercentCallback = Callable[[int], None]
@@ -711,6 +718,59 @@ def write_metadata_tags(
     audio.save()
 
 
+# --- AccurateRip照合用のPCMサンプル読み込み -------------------------------
+
+
+def read_pcm_samples(
+    wav_path: Path,
+    start_frame: int = 0,
+    num_frames: int | None = None,
+) -> list[int]:
+    """WAVファイルからAccurateRip形式のサンプル列を読み込む。
+
+    音楽CD（44.1kHz/16bit/ステレオ、CD-DA固定フォーマット）を前提とする。
+    各サンプルは左右チャンネル（16bit符号あり→符号なし変換）を
+    ``(right << 16) | left``として結合した32bit値
+    （``accuraterip.search_offset_v1``が要求する形式、実機データで
+    動作確認済み）。
+    """
+    with wave.open(str(wav_path), "rb") as wav_file:
+        if wav_file.getnchannels() != 2:
+            raise AudioCdError(
+                f"想定外のチャンネル数です: {wav_file.getnchannels()}"
+            )
+        if wav_file.getsampwidth() != 2:
+            raise AudioCdError(
+                f"想定外のサンプル幅です: {wav_file.getsampwidth()}"
+            )
+        if wav_file.getframerate() != _ACCURATERIP_SAMPLE_RATE:
+            raise AudioCdError(
+                f"想定外のサンプルレートです: {wav_file.getframerate()}"
+            )
+
+        if start_frame:
+            wav_file.setpos(start_frame)
+
+        frames_to_read = (
+            wav_file.getnframes() - start_frame
+            if num_frames is None
+            else num_frames
+        )
+        raw = wav_file.readframes(frames_to_read)
+
+    interleaved = array.array("h")
+    interleaved.frombytes(raw)
+
+    samples = [0] * (len(interleaved) // 2)
+
+    for i in range(len(samples)):
+        left = interleaved[2 * i] & 0xFFFF
+        right = interleaved[2 * i + 1] & 0xFFFF
+        samples[i] = (right << 16) | left
+
+    return samples
+
+
 # --- ディスク全体のリッピング -------------------------------------------
 
 
@@ -719,6 +779,10 @@ class TrackOutcome:
     track_number: int
     output_path: Path
     verified: bool
+    #: AccurateRipで一致が確認できた場合の信頼度（投稿件数）。
+    #: ``None``は「未実施」（先頭/最終トラック、ディスク未登録、
+    #: 探索範囲内で一致無し等）を意味し、「不一致」とは区別する。
+    accuraterip_confidence: int | None = None
 
 
 @dataclass(frozen=True)
@@ -745,6 +809,15 @@ class RipResult:
             if not track.verified
         ]
 
+    @property
+    def accuraterip_confirmed_tracks(self) -> list[int]:
+        """AccurateRipで一致が確認できたトラック番号一覧。"""
+        return [
+            track.track_number
+            for track in self.tracks
+            if track.accuraterip_confidence is not None
+        ]
+
 
 def rip_and_convert_disc(
     device: str,
@@ -760,9 +833,21 @@ def rip_and_convert_disc(
     cancel_check: CancelCheck | None = None,
     album_metadata: AlbumMetadata | None = None,
     fallback_folder_name: str | None = None,
+    disc_toc: DiscToc | None = None,
+    accuraterip_search_range: int = get_config().accuraterip.search_range_samples,
 ) -> RipResult:
     """音楽CDの全トラックをリッピングし、指定フォーマットで
     ``destination_dir`` に書き出す。
+
+    ``verify`` が ``True`` の場合、各トラックの自己一致検証に加えて、
+    リッピング完了後に一括でAccurateRip照合を試みる（詳細は
+    ``docs/design/accuraterip.md``を参照）。``disc_toc``を渡すと
+    （呼び出し側が既にTOCを取得済みの場合）、AccurateRip用の
+    ``cd-paranoia -Q``の再実行を省略できる。ディスクの最初・最後の
+    トラックは照合の対象外（端点のトリミング規則が実データで未確認の
+    ため）。ディスクがAccurateRipに登録されていない・ネットワーク
+    エラーの場合もベストエフォートで無視し、リッピング自体の成否には
+    影響させない。
 
     ``on_percent`` にはトラック単位の粗い進捗率（0〜100）を通知する。
     ``cancel_check`` が ``True`` を返した時点で、以降のトラック処理を
@@ -802,6 +887,11 @@ def rip_and_convert_disc(
     tracks: list[TrackOutcome] = []
     failed: list[tuple[int, str]] = []
     cancelled = False
+    #: verify=True の場合のみ、変換後も即座に削除せず保持しておく
+    #: トラック番号→WAVパス（AccurateRip照合が前後トラックの境界
+    #: サンプルを必要とするため）。verify=False時は空のまま
+    #: （従来どおり即座に削除、挙動変更なし）。
+    retained_wav_paths: dict[int, Path] = {}
 
     for track_number in range(1, track_count + 1):
         if cancel_check is not None and cancel_check():
@@ -866,7 +956,10 @@ def rip_and_convert_disc(
             failed.append((track_number, str(exc)))
             continue
         finally:
-            rip_result.wav_path.unlink(missing_ok=True)
+            if verify:
+                retained_wav_paths[track_number] = rip_result.wav_path
+            else:
+                rip_result.wav_path.unlink(missing_ok=True)
 
         if album_metadata is not None:
             try:
@@ -890,6 +983,93 @@ def rip_and_convert_disc(
 
     if on_percent is not None and not cancelled:
         on_percent(100)
+
+    accuraterip_confidences: dict[int, int] = {}
+
+    if verify:
+        try:
+            if not cancelled and tracks:
+                try:
+                    toc = (
+                        disc_toc
+                        if disc_toc is not None
+                        else query_disc_toc(device)
+                    )
+                    ids = accuraterip.compute_ids(
+                        toc.track_offsets, toc.leadout_offset
+                    )
+                    lookup_result = accuraterip.lookup(
+                        len(toc.track_offsets), ids
+                    )
+
+                    # ディスクの最初・最後のトラックは、端点の
+                    # トリミング規則が実データで未確認のため対象外
+                    # （docs/design/accuraterip.md 4.2節を参照）。
+                    if lookup_result.ok and lookup_result.tracks:
+                        pad_frames = accuraterip_search_range + 100
+
+                        for target_track in range(
+                            2, len(toc.track_offsets)
+                        ):
+                            candidates = lookup_result.tracks.get(
+                                target_track
+                            )
+                            prev_wav = retained_wav_paths.get(
+                                target_track - 1
+                            )
+                            this_wav = retained_wav_paths.get(
+                                target_track
+                            )
+                            next_wav = retained_wav_paths.get(
+                                target_track + 1
+                            )
+
+                            if not candidates or not (
+                                prev_wav and this_wav and next_wav
+                            ):
+                                continue
+
+                            leading = read_pcm_samples(prev_wav)[
+                                -pad_frames:
+                            ]
+                            this_samples = read_pcm_samples(this_wav)
+                            trailing = read_pcm_samples(
+                                next_wav, 0, pad_frames
+                            )
+                            padded = leading + this_samples + trailing
+
+                            match = accuraterip.search_offset_v1(
+                                padded,
+                                len(leading),
+                                len(this_samples),
+                                candidates,
+                                accuraterip_search_range,
+                            )
+
+                            if match is not None:
+                                accuraterip_confidences[target_track] = (
+                                    match.confidence
+                                )
+                except Exception:  # noqa: BLE001
+                    # ディスク未登録・ネットワークエラー・WAV読み込みの
+                    # 想定外の失敗等はベストエフォートで無視し、
+                    # リッピング自体は成功として扱う
+                    # （musicbrainzのオンライン検索と同じ方針）。
+                    pass
+        finally:
+            for wav_path in retained_wav_paths.values():
+                wav_path.unlink(missing_ok=True)
+
+    if accuraterip_confidences:
+        tracks = [
+            replace(
+                track,
+                accuraterip_confidence=accuraterip_confidences.get(
+                    track.track_number
+                ),
+            )
+            for track in tracks
+        ]
 
     return RipResult(
         tracks=tracks,
@@ -923,6 +1103,7 @@ if QThread is not None:
             verify: bool = True,
             album_metadata: AlbumMetadata | None = None,
             fallback_folder_name: str | None = None,
+            disc_toc: DiscToc | None = None,
             parent=None,
         ) -> None:
             super().__init__(parent)
@@ -933,6 +1114,7 @@ if QThread is not None:
             self._verify = verify
             self._album_metadata = album_metadata
             self._fallback_folder_name = fallback_folder_name
+            self._disc_toc = disc_toc
             self._process: subprocess.Popen[str] | None = None
             self._cancel_requested = False
 
@@ -970,6 +1152,7 @@ if QThread is not None:
                     cancel_check=self._is_cancelled,
                     album_metadata=self._album_metadata,
                     fallback_folder_name=self._fallback_folder_name,
+                    disc_toc=self._disc_toc,
                 )
             except AudioCdError as exc:
                 self.finished_ok.emit(False, str(exc))
@@ -1006,6 +1189,13 @@ if QThread is not None:
                 message += (
                     f"（トラック{unverified}は複数回読み取っても"
                     "一致せず未検証です）"
+                )
+
+            if self._verify and result.accuraterip_confirmed_tracks:
+                message += (
+                    f"（AccurateRipで"
+                    f"{len(result.accuraterip_confirmed_tracks)}/"
+                    f"{len(result.tracks)}曲が確認されました）"
                 )
 
             self.finished_ok.emit(True, message)

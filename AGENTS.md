@@ -2,6 +2,8 @@
 
 このリポジトリは、macOS上で光学ディスク（データCD/音楽CD/DVD/Blu-ray）からWindows/Linuxでも読めるISOイメージ（ISO 9660 + Joliet + Rock Ridge + 任意でUDF）を作成するための、Pythonベース GUIアプリケーションです。AIコーディングエージェントがこのプロジェクトを扱う際は、以下の方針に従ってください。
 
+複雑な機能（アルゴリズムの設計判断・実機検証の経緯・採用しなかった代替案とその理由等）については、この`AGENTS.md`とは別に`docs/design/`配下に個別の設計ドキュメントを置く（例: [docs/design/accuraterip.md](docs/design/accuraterip.md)）。該当機能に変更を加えた場合は、実装だけでなく対応する設計ドキュメントも同じ変更の中で更新し、ドキュメントが実装より古いまま放置されないようにすること。
+
 ## プロジェクト概要
 
 - **パッケージ名**: `mkhybrid-gui`（PyPI配布名・リポジトリ名）。Python内の `import` 名はハイフンを使えないため、モジュール名は `mkhybrid_gui`（アンダースコア表記）とする。
@@ -158,7 +160,13 @@ make distclean  # clean に加えて .venv も削除
    - **排他アクセスのためのアンマウント（実機で確認済み）**: `cd-paranoia`と異なり、`cdrdao`はマウントされたボリュームがあると排他アクセスできず失敗する。音楽CDは各トラックが個別の`CD_DA`ボリュームとしてマウントされるため、単一パーティションの`diskutil unmount`では不十分で、ディスク全体を対象にする`diskutil unmountDisk`（`disk_utils.unmount_disk()`）が必要。**さらに、アンマウントしてから`cdrdao`を起動するまで間を空けると、macOSが自動的に再マウントしてしまい失敗する**（実機で再現・確認済み）。`MainWindow._start_cdrdao_rip()`は、ユーザーへの確認ダイアログの直後、`unmount_disk()`→`scan_bus()`/`find_scsi_device()`→ワーカー起動までを他の処理を挟まず連続して行うこと。完了時（成功・失敗・中断いずれも）は`disk_utils.mount_disk()`で必ず再マウントを試みる（`MainWindow._on_finished()`）。
    - **進捗表示（実機で確認済み）**: `cdrdao`はトラック一覧やサブチャンネル読み取り状況等のログは出力するが、機械可読な進捗率（パーセント）は出力しない。そのため進捗バーは`hdiutil makehybrid`と同様、不確定（ビジー）表示のままにする。
    - **実機での動作確認**: 実際のASUS SDRW-08U9M-U（USB接続）・20トラック/約564MB/約53分の音楽CDで、`--paranoia-mode 3`によるフルパラノイア読み取り全体が成功することを確認済み（所要時間約13分、`.bin`のサイズがdiskutilの報告するディスクサイズと完全一致）。
-10. **設定のTOML反映・保存**: [config.py](src/mkhybrid_gui/config.py) はアプリ内部のチューニング値（`MediaSizeThresholds`/`AudioRipSettings`）に加え、GUI上のオプション選択を次回起動時にも復元するための `UiPreferences`（出力先フォルダ・Joliet/Rock Ridge/UDF・書き出し形式・検証有無）を保持する。
+10. **AccurateRip照合（v1のみ）**: 詳細設計は[docs/design/accuraterip.md](docs/design/accuraterip.md)を参照。「厳密な検証」チェックボックス（`verify`）がONの場合、既存の自己一致検証に加え、リッピング完了後に一括で[AccurateRip](http://www.accuraterip.com/)への照合を試みる。
+    - `accuraterip.py`がID計算・ネットワーク問い合わせ・CRC v1のオフセット探索（前置和による高速化、実機で動作確認済み）を担当し、UIフレームワーク・ファイルI/Oに依存しない。
+    - `audio_cd.rip_and_convert_disc()`は、`verify=True`の場合のみ各トラックの一時WAVを即座に削除せず保持し、全トラックのリッピング完了後に第2パスとしてAccurateRip照合をまとめて行い、最後に全WAVを削除する（`read_pcm_samples`でPCMサンプルを読み込む）。
+    - ディスクの最初・最後のトラックは照合の対象外（端点のトリミング規則が実データで未確認のため）。中間トラックのみ`TrackOutcome.accuraterip_confidence`に信頼度が設定される（`None`は「未実施」、「不一致」ではない）。
+    - `config.AccurateRipSettings.search_range_samples`（既定1000）で探索範囲を設定可能。
+    - CRC v2は正確な式を実データで特定できなかったため未実装（詳細はdocs/design/accuraterip.mdの3.4節）。
+11. **設定のTOML反映・保存**: [config.py](src/mkhybrid_gui/config.py) はアプリ内部のチューニング値（`MediaSizeThresholds`/`AudioRipSettings`/`AccurateRipSettings`）に加え、GUI上のオプション選択を次回起動時にも復元するための `UiPreferences`（出力先フォルダ・Joliet/Rock Ridge/UDF・書き出し形式・検証有無）を保持する。
    - `config.get_config()` は既定パス（環境変数 `XDG_CACHE_HOME`（未設定時は `~/.cache`）配下の `mkhybrid/config.toml`。環境変数 `MKHYBRID_GUI_CONFIG` でパス自体を上書き可）から読み込み、`config.save_config()` は同じパスへTOMLとして書き戻す（`config.to_toml_string()` が手書きのシリアライザ。標準ライブラリの `tomllib` は読み込み専用のため）。設定はXDG的には本来 `XDG_CONFIG_HOME` に置くのがより適切だが、本プロジェクトの要件により `XDG_CACHE_HOME` 配下を使用する（`config.default_config_path()`）。
    - GUIはメイン画面（`MainWindow`）を `QTabWidget` で「ISO作成 / 音楽CD」タブと「設定」タブの2タブに分割する（`_build_main_tab`/`_build_settings_tab`）。「設定」タブでは `MediaSizeThresholds`/`AudioRipSettings`（サイズ閾値はMB単位のスピンボックスで表示、内部はバイトへ換算）を編集でき、「設定を保存」ボタン（`_on_settings_save_clicked`）で即座にTOMLへ反映・保存できる。設定ファイルの実際の場所も同タブに表示する（`config.get_config_path()`）。
    - `MainWindow.__init__()` はウィジェット構築直後に `config.get_config()` を読み込んで両タブの各ウィジェット（Joliet/Rock Ridge/UDFチェックボックス、検証チェックボックス、書き出し形式ラジオボタン、出力先ダイアログの初期フォルダ、設定タブのスピンボックス群）へ反映し（`_apply_config`）、`closeEvent()`（ワーカー実行中でない場合のみ）で両タブの現在の状態をまとめて保存する（`_save_current_settings`、内部で `_collect_current_config` を使用）。設定ファイルへの書き込みに失敗しても（権限不足等）アプリの終了自体は妨げない。
@@ -173,7 +181,8 @@ make distclean  # clean に加えて .venv も削除
 - `audio_cd.py` は実際の音楽CD・cd-paranoia/afconvert/flacバイナリを使わず、`subprocess.run`/`subprocess.Popen` をモック化してトラック数解析・コマンド組み立て・検証ロジック（複数回読み取りの一致判定）・変換処理を検証する。ただし `write_metadata_tags`（`mutagen`）は外部バイナリに依存しない純Pythonのため、モックせず実際に妥当なフォーマットの最小限のファイル（`wave`標準モジュールやバイト列を直接組み立てて生成、Homebrew依存の`flac`バイナリや非推奨の`aifc`モジュールは使わない）を用意してタグの読み書きをテストする。
 - `metadata.py` の `compute_disc_id` は、実際にMusicBrainz APIへ問い合わせて確認した実データ（disc id・offsets・sectors）をテストベクタとして使う（当てずっぽうの値やlibdiscid由来の値を使わない）。
 - `musicbrainz.py` は実ネットワークを使わず、`url_opener` を差し替えたフェイクレスポンスで正常系（0/1/複数件）・HTTPエラー・タイムアウト・不正JSONを検証する。
-- `accuraterip.py`（`compute_ids`/`build_query_url`/`lookup`）も同様に実ネットワークを使わず、`url_opener`を差し替えたフェイクバイナリレスポンス（`_HEADER_STRUCT`/`_ENTRY_STRUCT`と同じ構造で自作）で検証する（`tests/test_accuraterip.py`）。`compute_ids`のテストベクタは、実際のAccurateRipサーバーで確認した実データではなく、実装済みの計算式から手計算で導出した自作TOCによるspec-conformanceテストである点に注意（元になった実データの生TOCは保存されておらず再現できないため。次に実機で確認する機会があれば、実データによるテストベクタに置き換えることが望ましい）。`metadata.compute_disc_id`（MusicBrainz、`LEAD_IN_FRAMES`加算あり）とオフセット規約が異なることを直接検証するテストも含む。
+- `accuraterip.py`（`compute_ids`/`build_query_url`/`lookup`）も同様に実ネットワークを使わず、`url_opener`を差し替えたフェイクバイナリレスポンス（`_HEADER_STRUCT`/`_ENTRY_STRUCT`と同じ構造で自作）で検証する（`tests/test_accuraterip.py`）。`compute_ids`のテストベクタは、実際のAccurateRipサーバーで確認した実データではなく、実装済みの計算式から手計算で導出した自作TOCによるspec-conformanceテストである点に注意（元になった実データの生TOCは保存されておらず再現できないため。次に実機で確認する機会があれば、実データによるテストベクタに置き換えることが望ましい）。`metadata.compute_disc_id`（MusicBrainz、`LEAD_IN_FRAMES`加算あり）とオフセット規約が異なることを直接検証するテストも含む。`search_offset_v1`（CRC v1のオフセット探索、実機で動作確認済み）は、前置和による高速版（`_fast_v1`）が素朴なO(L)参照実装（テスト内に直接書く）とランダムデータで一致することを検証する。
+- `audio_cd.read_pcm_samples`（AccurateRip用のPCM読み込み）は、既知の左右チャンネル値から生成した最小WAVで、サンプルの結合（`(right<<16)|left`）とチャンネル数/サンプル幅/サンプルレートの検証を確認する。`rip_and_convert_disc`のAccurateRip統合は、`accuraterip.lookup`をモックし、中間トラックのみ`accuraterip_confidence`が設定されること・先頭/最終トラックは対象外のままであること・`verify=False`時は挙動が変わらない（一時WAVが即座に削除される）ことを検証する。
 - GUI部分のテストには `pytest-qt`（`qtbot`）を用いる（[tests/test_main_window.py](tests/test_main_window.py)）。`IsoWorker`/`AudioRipWorker`/`MetadataLookupWorker`は実際に起動せず、`list_volumes`/`query_disc_toc`/`missing_tools`等の呼び出し境界をモック化し、ウィジェットの表示切り替え・入力検証・状態管理のロジックのみを検証する。`QMessageBox`はモーダルダイアログのためstaticメソッドを差し替え、テストがブロックされないようにする。ワーカースレッドを実際に起動して完了まで待つ結合テストは対象外（README.md の「ロードマップ・既知の制限」で追跡している）。
 - 実機（実CD-ROM/DVD/BD/音楽CD）を使った結合テストはCI対象外とし、手動確認手順をREADMEに記載する。
 
@@ -193,6 +202,10 @@ make distclean  # clean に加えて .venv も削除
 - `MainWindow._start_cdrdao_rip()`で、`unmount_disk()`の呼び出しと`CdrdaoWorker`の起動（`cdrdao.scan_bus()`/`find_scsi_device()`を含む）の間に、ユーザー操作を待つダイアログや他の重い処理を挟まない。アンマウントしてから`cdrdao`が実際にドライブへアクセスするまでに間が空くと、macOSが自動的に再マウントしてしまい`cdrdao`が"Device already in use"で失敗する（実機で再現・確認済みの回帰）。
 - `cdrdao`の`--device`に`/dev/rdiskN`（`disk_utils.whole_disk_raw_device()`の戻り値）を渡す実装に戻さない。`cdrdao`はmacOSでは`cdrdao scanbus`が返すIOKitレジストリパスしか受け付けず、`/dev/rdiskN`を渡すと`Cannot setup device`で必ず失敗する（実機で確認済み）。
 - `MainWindow._on_finished()`から、`_cdrdao_unmounted_device_identifier`が設定されている場合の`mount_disk()`呼び出しを削除しない。省略すると、cdrdao実行後にディスクがアンマウントされたままになり、Finder等から見えなくなる。
+- `audio_cd.rip_and_convert_disc()`で、`verify=True`時にトラックの一時WAVを（従来のように）変換直後に即座に削除する実装に戻さない。AccurateRip照合には前後トラックの境界サンプルが必要で、全トラック終了後の第2パスで初めて読み込む。削除は第2パス完了後にまとめて行うこと（詳細は[docs/design/accuraterip.md](docs/design/accuraterip.md)の4.1節）。
+- `accuraterip.py`のCRC v2（`crc_v2`）照合を、確認されていない式のまま実装しない。実データで2種類の候補式（per-term fold・末尾一括fold）を試したがいずれも一致しなかった（詳細はdocs/design/accuraterip.mdの3.4節）。新しい式を試す場合も、必ず実機データでの検証を経ること。
+- `accuraterip`によるAccurateRip照合を、ディスクの最初・最後のトラックにも適用しない。端点のトリミング規則が実データで確認できていないため、`audio_cd.rip_and_convert_disc()`は中間トラック（2番目〜最後から2番目）のみを対象にすること。
+- `accuraterip.search_offset_v1()`/`_fast_v1()`の乗数を、探索するオフセット仮説（窓の開始位置）から計算する実装に戻さない。乗数は窓の中でのローカル位置（1始まり）でなければならず、絶対位置から計算すると実機検証で発見した回帰（オフセットを変えるたびに乗数がずれ、常に不一致になる）が再発する。
 - `iso_builder.verify_iso()` を `subprocess.run`（完了を待ってから出力をまとめて渡す方式）に戻さない。検証中のGUI進捗表示が完了までフリーズしたように見える回帰になる。
 - `iso_builder.verify_iso()` を `hdiutil verify` ベースの実装に戻さない。`hdiutil makehybrid` が生成するイメージにはチェックサムが一切含まれないため（実機確認済み）、`hdiutil verify` は正常なISOイメージに対しても必ず失敗し、ISO作成が実際には成功しているのに毎回「失敗」と誤報告する重大な回帰になる。
 - `IsoWorker.run()` から `verify_iso()` への `source=self._source` の受け渡しを削除しない。UDFを含まない（ISO9660/Jolietのみの、CD選択時の既定）イメージでは、`source` が無いと検証が「attachできたことのみ確認」まで後退し、切り詰め・内容破損があっても検出できなくなる（実機での報告により発見・修正済みの回帰）。

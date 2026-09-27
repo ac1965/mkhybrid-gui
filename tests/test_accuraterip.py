@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import random
 import struct
 import urllib.error
 import urllib.request
@@ -23,9 +24,11 @@ import pytest
 
 from mkhybrid_gui.accuraterip import (
     AccurateRipIds,
+    AccurateRipTrackEntry,
     build_query_url,
     compute_ids,
     lookup,
+    search_offset_v1,
 )
 from mkhybrid_gui.metadata import compute_disc_id
 
@@ -262,3 +265,93 @@ def test_lookup_returns_empty_tracks_on_truncated_binary_data() -> None:
 
     assert result.ok is True
     assert result.tracks == {}
+
+
+# --- CRC v1（前置和によるオフセット探索） ---------------------------------
+
+
+def _brute_force_v1(samples: list[int], start: int, length: int) -> int:
+    """``_fast_v1``の素朴なO(L)参照実装（テスト内でのみ使用）。
+
+    乗数はウィンドウ内のローカル位置（1始まり）であり、``start``には
+    依存しない。実機セッションでの調査の結果、これが正しい仕様である
+    ことを確認済み（``start``自体を乗数に含めてしまう誤りが最初にあった）。
+    """
+    total = 0
+    for local_index, value in enumerate(samples[start : start + length]):
+        total += value * (local_index + 1)
+    return total & 0xFFFFFFFF
+
+
+def test_fast_v1_matches_brute_force_reference_on_random_data() -> None:
+    """前置和による高速版が、素朴なO(L)参照実装と一致することを、
+    ランダムデータで検証する（実機データ検証時に発見した、乗数が
+    オフセットに依存してしまう回帰を防ぐ）。
+    """
+    from mkhybrid_gui.accuraterip import _build_prefix_sums, _fast_v1
+
+    rng = random.Random(42)
+    samples = [rng.randint(0, 0xFFFFFFFF) for _ in range(5000)]
+    prefix_sum, prefix_weighted = _build_prefix_sums(samples)
+
+    length = 2000
+    for start in range(0, len(samples) - length, 137):
+        expected = _brute_force_v1(samples, start, length)
+        actual = _fast_v1(prefix_sum, prefix_weighted, start, length)
+        assert actual == expected, f"start={start}"
+
+
+def test_search_offset_v1_finds_match_at_known_offset() -> None:
+    rng = random.Random(7)
+    track_start = 1000
+    track_length = 500
+    padded = [rng.randint(0, 0xFFFFFFFF) for _ in range(track_start * 2 + track_length)]
+
+    true_offset = 15
+    target_crc = _brute_force_v1(
+        padded, track_start + true_offset, track_length
+    )
+    candidates = [
+        AccurateRipTrackEntry(confidence=24, crc_v1=target_crc, crc_v2=0),
+        AccurateRipTrackEntry(confidence=3, crc_v1=0xDEADBEEF, crc_v2=0),
+    ]
+
+    match = search_offset_v1(
+        padded, track_start, track_length, candidates, search_range=100
+    )
+
+    assert match is not None
+    assert match.offset == true_offset
+    assert match.confidence == 24
+    assert match.crc_v1 == target_crc
+
+
+def test_search_offset_v1_returns_none_when_offset_out_of_range() -> None:
+    rng = random.Random(7)
+    track_start = 1000
+    track_length = 500
+    padded = [rng.randint(0, 0xFFFFFFFF) for _ in range(track_start * 2 + track_length)]
+
+    # 真のオフセットは200だが、探索範囲は±100に限定する。
+    target_crc = _brute_force_v1(padded, track_start + 200, track_length)
+    candidates = [
+        AccurateRipTrackEntry(confidence=24, crc_v1=target_crc, crc_v2=0)
+    ]
+
+    match = search_offset_v1(
+        padded, track_start, track_length, candidates, search_range=100
+    )
+
+    assert match is None
+
+
+def test_search_offset_v1_returns_none_when_no_candidates_match() -> None:
+    rng = random.Random(7)
+    padded = [rng.randint(0, 0xFFFFFFFF) for _ in range(2500)]
+    candidates = [
+        AccurateRipTrackEntry(confidence=24, crc_v1=0xDEADBEEF, crc_v2=0)
+    ]
+
+    match = search_offset_v1(padded, 1000, 500, candidates, search_range=100)
+
+    assert match is None

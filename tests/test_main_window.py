@@ -1401,6 +1401,7 @@ def test_settings_tab_shows_default_tuning_values(window: MainWindow) -> None:
     assert window.cd_max_size_spin.value() == 1000
     assert window.dvd_max_size_spin.value() == 10000
     assert window.audio_verify_attempts_spin.value() == 3
+    assert window.accuraterip_search_range_spin.value() == 1000
 
 
 def test_construction_applies_saved_tuning_values(
@@ -1414,6 +1415,9 @@ def test_construction_applies_saved_tuning_values(
                 cd_max_bytes=500_000_000, dvd_max_bytes=8_000_000_000
             ),
             audio_rip=config.AudioRipSettings(max_attempts=5),
+            accuraterip=config.AccurateRipSettings(
+                search_range_samples=250
+            ),
         )
     )
 
@@ -1423,6 +1427,7 @@ def test_construction_applies_saved_tuning_values(
     assert w.cd_max_size_spin.value() == 500
     assert w.dvd_max_size_spin.value() == 8000
     assert w.audio_verify_attempts_spin.value() == 5
+    assert w.accuraterip_search_range_spin.value() == 250
 
 
 def test_settings_save_button_persists_tuning_and_ui_values(
@@ -1431,6 +1436,7 @@ def test_settings_save_button_persists_tuning_and_ui_values(
     window.cd_max_size_spin.setValue(123)
     window.dvd_max_size_spin.setValue(4567)
     window.audio_verify_attempts_spin.setValue(7)
+    window.accuraterip_search_range_spin.setValue(333)
     window.udf_checkbox.setChecked(True)
 
     window._on_settings_save_clicked()
@@ -1439,8 +1445,15 @@ def test_settings_save_button_persists_tuning_and_ui_values(
     assert saved.media_size.cd_max_bytes == 123_000_000
     assert saved.media_size.dvd_max_bytes == 4_567_000_000
     assert saved.audio_rip.max_attempts == 7
+    assert saved.accuraterip.search_range_samples == 333
     assert saved.ui.udf is True
     assert "保存しました" in window.settings_status_label.text()
+
+
+def test_verify_checkbox_discloses_accuraterip_network_communication(
+    window: MainWindow,
+) -> None:
+    assert "AccurateRip" in window.verify_checkbox.text()
 
 
 def test_close_event_also_saves_settings_tab_values(

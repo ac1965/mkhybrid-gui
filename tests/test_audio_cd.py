@@ -12,10 +12,12 @@ from pathlib import Path
 
 import pytest
 
-from mkhybrid_gui import audio_cd
+from mkhybrid_gui import accuraterip, audio_cd
+from mkhybrid_gui.accuraterip import AccurateRipLookupResult, AccurateRipTrackEntry
 from mkhybrid_gui.audio_cd import (
     AudioCdError,
     AudioFormat,
+    DiscToc,
     RipCancelled,
     RipTrackResult,
     build_convert_command,
@@ -26,6 +28,7 @@ from mkhybrid_gui.audio_cd import (
     output_extension,
     parse_disc_toc,
     parse_track_count,
+    read_pcm_samples,
     rip_and_convert_disc,
     rip_track_verified,
     write_metadata_tags,
@@ -754,6 +757,90 @@ def _build_minimal_wav(path: Path) -> None:
         f.writeframes(b"\x00" * 4 * 10)
 
 
+def _build_wav_with_stereo_samples(
+    path: Path, stereo_samples: list[tuple[int, int]]
+) -> None:
+    """左右チャンネル（16bit符号あり整数）を指定してWAVを組み立てる
+    （``read_pcm_samples``のテスト用）。
+    """
+    import struct
+    import wave
+
+    frames = b"".join(
+        struct.pack("<hh", left, right) for left, right in stereo_samples
+    )
+
+    with wave.open(str(path), "wb") as f:
+        f.setnchannels(2)
+        f.setsampwidth(2)
+        f.setframerate(44100)
+        f.writeframes(frames)
+
+
+# --- read_pcm_samples（AccurateRip照合用のPCM読み込み） -------------------
+
+
+def test_read_pcm_samples_combines_left_right_channels(tmp_path: Path) -> None:
+    path = tmp_path / "samples.wav"
+    _build_wav_with_stereo_samples(
+        path,
+        [
+            (0, 0),
+            (1, 0),
+            (0, 1),
+            (-1, -1),
+            (32767, -32768),
+        ],
+    )
+
+    samples = read_pcm_samples(path)
+
+    assert samples[0] == 0
+    assert samples[1] == 1
+    assert samples[2] == (1 << 16)
+    assert samples[3] == 0xFFFFFFFF
+    assert samples[4] == (0x8000 << 16) | 0x7FFF
+
+
+def test_read_pcm_samples_supports_partial_range(tmp_path: Path) -> None:
+    path = tmp_path / "samples.wav"
+    _build_wav_with_stereo_samples(path, [(i, i) for i in range(10)])
+
+    samples = read_pcm_samples(path, start_frame=3, num_frames=2)
+
+    assert samples == [(3 << 16) | 3, (4 << 16) | 4]
+
+
+def test_read_pcm_samples_rejects_mono_wav(tmp_path: Path) -> None:
+    import wave
+
+    path = tmp_path / "mono.wav"
+    with wave.open(str(path), "wb") as f:
+        f.setnchannels(1)
+        f.setsampwidth(2)
+        f.setframerate(44100)
+        f.writeframes(b"\x00\x00" * 10)
+
+    with pytest.raises(AudioCdError):
+        read_pcm_samples(path)
+
+
+def test_read_pcm_samples_rejects_unexpected_sample_rate(
+    tmp_path: Path,
+) -> None:
+    import wave
+
+    path = tmp_path / "wrong_rate.wav"
+    with wave.open(str(path), "wb") as f:
+        f.setnchannels(2)
+        f.setsampwidth(2)
+        f.setframerate(48000)
+        f.writeframes(b"\x00" * 4 * 10)
+
+    with pytest.raises(AudioCdError):
+        read_pcm_samples(path)
+
+
 def _build_minimal_flac(path: Path) -> None:
     import struct
 
@@ -1208,3 +1295,231 @@ def test_rip_and_convert_disc_album_name_takes_priority_over_fallback(
     album_dir = dest / "Test Album"
     assert result.output_directory == album_dir
     assert (album_dir / "Track01.wav").exists()
+
+
+# --- AccurateRip照合の統合 ------------------------------------------------
+
+
+def _brute_v1(samples: list[int], start: int, length: int) -> int:
+    """テスト内でのみ使う素朴な参照実装（乗数はウィンドウ内ローカル位置）。"""
+    total = 0
+    for local_index, value in enumerate(samples[start : start + length]):
+        total += value * (local_index + 1)
+    return total & 0xFFFFFFFF
+
+
+def _track_samples(track_number: int, count: int) -> list[tuple[int, int]]:
+    """トラック番号ごとに決定的な（左, 右）サンプル列を作る（テスト用）。"""
+    base = track_number * 1000
+    return [(base + i, base + i) for i in range(count)]
+
+
+def _combined_track_values(
+    track_number: int, count: int
+) -> list[int]:
+    return [
+        (right << 16) | (left & 0xFFFF)
+        for left, right in _track_samples(track_number, count)
+    ]
+
+
+def test_rip_and_convert_disc_confirms_middle_track_via_accuraterip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """3トラック中、中間のトラック2のみAccurateRip照合の対象になり、
+    既知のオフセットで一致した投稿のconfidenceが反映されることを検証する。
+    先頭・最終トラック（1・3）は対象外のまま``None``であることも確認する。
+    """
+    track_frame_counts = {1: 30, 2: 200, 3: 30}
+
+    def fake_run(cmd, **kwargs):
+        class FakeCompletedProcess:
+            returncode = 0
+            stdout = SAMPLE_QUERY_OUTPUT
+            stderr = ""
+
+        return FakeCompletedProcess()
+
+    class _FakeAccurateRipPopen:
+        def __init__(self, cmd, **kwargs):
+            track_number = int(cmd[-2])
+            output_path = Path(cmd[-1])
+            _build_wav_with_stereo_samples(
+                output_path,
+                _track_samples(
+                    track_number, track_frame_counts[track_number]
+                ),
+            )
+            self.stdout = iter([])
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", _FakeAccurateRipPopen)
+    monkeypatch.setattr(
+        audio_cd,
+        "effective_path",
+        lambda: "/opt/homebrew/bin:/usr/bin:/bin",
+    )
+
+    # トラック2の前後（トラック1の末尾・トラック3の先頭）を含めた
+    # パディング済みサンプル列から、既知のオフセット(+2)でのCRCを
+    # あらかじめ計算し、AccurateRipの投稿として仕込む。
+    search_range = 10
+    pad_frames = search_range + 5
+    leading = _combined_track_values(1, track_frame_counts[1])[
+        -pad_frames:
+    ]
+    this_samples = _combined_track_values(2, track_frame_counts[2])
+    trailing = _combined_track_values(3, track_frame_counts[3])[
+        :pad_frames
+    ]
+    padded = leading + this_samples + trailing
+    known_offset = 2
+    target_crc_v1 = _brute_v1(
+        padded, len(leading) + known_offset, len(this_samples)
+    )
+
+    fake_lookup_result = AccurateRipLookupResult(
+        tracks={
+            2: [
+                AccurateRipTrackEntry(
+                    confidence=17, crc_v1=target_crc_v1, crc_v2=0
+                )
+            ]
+        }
+    )
+    monkeypatch.setattr(
+        audio_cd.accuraterip,
+        "lookup",
+        lambda track_count, ids, **kwargs: fake_lookup_result,
+    )
+
+    dest = tmp_path / "out"
+    work = tmp_path / "work"
+
+    result = rip_and_convert_disc(
+        "/dev/rdisk4",
+        dest,
+        AudioFormat.WAV,
+        work,
+        verify=True,
+        accuraterip_search_range=search_range,
+    )
+
+    assert result.ok is True
+    outcomes = {t.track_number: t for t in result.tracks}
+    assert outcomes[1].accuraterip_confidence is None
+    assert outcomes[3].accuraterip_confidence is None
+    assert outcomes[2].accuraterip_confidence == 17
+    assert result.accuraterip_confirmed_tracks == [2]
+
+    # AccurateRip照合のために保持していた一時WAVは、最終的に
+    # すべて削除されていること（ディスク容量を無駄に消費しない）。
+    assert list(work.glob("*.wav")) == []
+
+
+def test_rip_and_convert_disc_skips_accuraterip_when_lookup_finds_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_run(cmd, **kwargs):
+        class FakeCompletedProcess:
+            returncode = 0
+            stdout = SAMPLE_QUERY_OUTPUT
+            stderr = ""
+
+        return FakeCompletedProcess()
+
+    class _FakePopen:
+        def __init__(self, cmd, **kwargs):
+            output_path = Path(cmd[-1])
+            _build_minimal_wav(output_path)
+            self.stdout = iter([])
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(
+        audio_cd,
+        "effective_path",
+        lambda: "/opt/homebrew/bin:/usr/bin:/bin",
+    )
+    monkeypatch.setattr(
+        audio_cd.accuraterip,
+        "lookup",
+        lambda track_count, ids, **kwargs: AccurateRipLookupResult(
+            tracks={}
+        ),
+    )
+
+    dest = tmp_path / "out"
+    work = tmp_path / "work"
+
+    result = rip_and_convert_disc(
+        "/dev/rdisk4", dest, AudioFormat.WAV, work, verify=True
+    )
+
+    assert result.ok is True
+    assert all(
+        t.accuraterip_confidence is None for t in result.tracks
+    )
+    assert result.accuraterip_confirmed_tracks == []
+    assert list(work.glob("*.wav")) == []
+
+
+def test_rip_and_convert_disc_does_not_retain_wavs_when_verify_false(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``verify=False``時は、AccurateRip関連の変更前と挙動が変わらない
+    （一時WAVは変換直後に即座に削除される）ことを確認する。
+    """
+
+    def fake_run(cmd, **kwargs):
+        class FakeCompletedProcess:
+            returncode = 0
+            stdout = SAMPLE_QUERY_OUTPUT
+            stderr = ""
+
+        return FakeCompletedProcess()
+
+    class _FakePopen:
+        def __init__(self, cmd, **kwargs):
+            output_path = Path(cmd[-1])
+            _build_minimal_wav(output_path)
+            self.stdout = iter([])
+
+        def wait(self) -> int:
+            return 0
+
+    lookup_calls: list = []
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(subprocess, "Popen", _FakePopen)
+    monkeypatch.setattr(
+        audio_cd,
+        "effective_path",
+        lambda: "/opt/homebrew/bin:/usr/bin:/bin",
+    )
+    monkeypatch.setattr(
+        audio_cd.accuraterip,
+        "lookup",
+        lambda *a, **k: lookup_calls.append(True),
+    )
+
+    dest = tmp_path / "out"
+    work = tmp_path / "work"
+
+    result = rip_and_convert_disc(
+        "/dev/rdisk4", dest, AudioFormat.WAV, work, verify=False
+    )
+
+    assert result.ok is True
+    assert lookup_calls == []  # verify=Falseの場合は照合自体を試みない
+    assert all(
+        t.accuraterip_confidence is None for t in result.tracks
+    )

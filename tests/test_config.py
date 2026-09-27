@@ -27,6 +27,7 @@ def test_get_config_returns_defaults_when_no_file(
     assert result.media_size.cd_max_bytes == 1_000_000_000
     assert result.media_size.dvd_max_bytes == 10_000_000_000
     assert result.audio_rip.max_attempts == 3
+    assert result.accuraterip.search_range_samples == 1000
     assert result.ui == config.UiPreferences()
     assert result.ui.joliet is True
     assert result.ui.udf is False
@@ -47,6 +48,9 @@ def test_get_config_overrides_from_toml_file(
 
         [audio_rip]
         max_attempts = 9
+
+        [accuraterip]
+        search_range_samples = 500
         """,
         encoding="utf-8",
     )
@@ -58,6 +62,7 @@ def test_get_config_overrides_from_toml_file(
     assert result.media_size.cd_max_bytes == 111
     assert result.media_size.dvd_max_bytes == 222
     assert result.audio_rip.max_attempts == 9
+    assert result.accuraterip.search_range_samples == 500
 
 
 def test_get_config_overrides_ui_section_from_toml_file(
@@ -243,6 +248,7 @@ def test_to_toml_string_round_trips_through_tomllib() -> None:
             cd_max_bytes=111, dvd_max_bytes=222
         ),
         audio_rip=config.AudioRipSettings(max_attempts=9),
+        accuraterip=config.AccurateRipSettings(search_range_samples=500),
         ui=config.UiPreferences(
             last_output_directory="/Volumes/Output",
             joliet=False,
@@ -259,6 +265,7 @@ def test_to_toml_string_round_trips_through_tomllib() -> None:
     assert parsed["media_size"]["cd_max_bytes"] == 111
     assert parsed["media_size"]["dvd_max_bytes"] == 222
     assert parsed["audio_rip"]["max_attempts"] == 9
+    assert parsed["accuraterip"]["search_range_samples"] == 500
     assert parsed["ui"]["last_output_directory"] == "/Volumes/Output"
     assert parsed["ui"]["joliet"] is False
     assert parsed["ui"]["udf"] is True
@@ -306,6 +313,7 @@ def test_save_config_round_trips_via_get_config(
             cd_max_bytes=555, dvd_max_bytes=666
         ),
         audio_rip=config.AudioRipSettings(max_attempts=1),
+        accuraterip=config.AccurateRipSettings(search_range_samples=250),
         ui=config.UiPreferences(
             last_output_directory="/Users/example/Desktop",
             joliet=False,

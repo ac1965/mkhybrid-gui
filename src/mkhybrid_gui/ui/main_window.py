@@ -197,7 +197,9 @@ class MainWindow(QMainWindow):
         form.addRow(self.audio_format_label, audio_format_row)
 
         self.verify_checkbox = QCheckBox(
-            "厳密な検証（各トラックを複数回読み取り比較。時間は約2倍）"
+            "厳密な検証（複数回読み取り比較 + AccurateRip照合。"
+            "ディスクの識別情報をAccurateRip.comへ送信します。"
+            "時間は約2倍）"
         )
         self.verify_checkbox.setChecked(True)
         form.addRow(self.verify_checkbox)
@@ -309,6 +311,14 @@ class MainWindow(QMainWindow):
             "音楽CD検証の最大試行回数:", self.audio_verify_attempts_spin
         )
 
+        self.accuraterip_search_range_spin = QSpinBox()
+        self.accuraterip_search_range_spin.setRange(0, 100_000)
+        self.accuraterip_search_range_spin.setSuffix(" サンプル")
+        form.addRow(
+            "AccurateRipのオフセット探索範囲（±）:",
+            self.accuraterip_search_range_spin,
+        )
+
         output_dir_row = QHBoxLayout()
         self.settings_output_dir_edit = QLineEdit()
         self.settings_output_dir_edit.setReadOnly(True)
@@ -415,6 +425,9 @@ class MainWindow(QMainWindow):
         self.audio_verify_attempts_spin.setValue(
             app_config.audio_rip.max_attempts
         )
+        self.accuraterip_search_range_spin.setValue(
+            app_config.accuraterip.search_range_samples
+        )
 
     def _collect_current_config(self) -> config.AppConfig:
         """「作成」タブ・「設定」タブ両方の現在の状態から ``AppConfig`` を組み立てる。"""
@@ -424,6 +437,9 @@ class MainWindow(QMainWindow):
         )
         audio_rip = config.AudioRipSettings(
             max_attempts=self.audio_verify_attempts_spin.value()
+        )
+        accuraterip_settings = config.AccurateRipSettings(
+            search_range_samples=self.accuraterip_search_range_spin.value()
         )
         ui = config.UiPreferences(
             last_output_directory=self._last_output_directory,
@@ -440,7 +456,10 @@ class MainWindow(QMainWindow):
         )
 
         return config.AppConfig(
-            media_size=media_size, audio_rip=audio_rip, ui=ui
+            media_size=media_size,
+            audio_rip=audio_rip,
+            accuraterip=accuraterip_settings,
+            ui=ui,
         )
 
     def _save_current_settings(self) -> bool:
@@ -1017,6 +1036,7 @@ class MainWindow(QMainWindow):
             verify=self.verify_checkbox.isChecked(),
             album_metadata=album_metadata,
             fallback_folder_name=fallback_folder_name,
+            disc_toc=self._disc_toc,
             parent=self,
         )
 

@@ -59,6 +59,20 @@ class AudioRipSettings:
 
 
 @dataclass(frozen=True)
+class AccurateRipSettings:
+    """AccurateRip照合（``accuraterip``）の既定値。
+
+    ドライブの読み取りオフセットは機種ごとに異なるため、既知のCRCと
+    一致するまで``±search_range_samples``の範囲でオフセットを探索する。
+    既定値の1000は、実機（ASUS SDRW-08U9M-U相当のUSB接続ドライブ）での
+    検証時に使用し、実際のオフセット（+6サンプル）を範囲内で発見できた
+    値。
+    """
+
+    search_range_samples: int = 1000
+
+
+@dataclass(frozen=True)
 class UiPreferences:
     """GUIのオプション選択のうち、次回起動時にも復元したい既定値。
 
@@ -96,6 +110,7 @@ class AppConfig:
 
     media_size: MediaSizeThresholds = MediaSizeThresholds()
     audio_rip: AudioRipSettings = AudioRipSettings()
+    accuraterip: AccurateRipSettings = AccurateRipSettings()
     ui: UiPreferences = UiPreferences()
 
 
@@ -195,6 +210,7 @@ def get_config() -> AppConfig:
 
     media_size_data = data.get("media_size")
     audio_rip_data = data.get("audio_rip")
+    accuraterip_data = data.get("accuraterip")
     ui_data = data.get("ui")
 
     media_size = _merge(
@@ -205,12 +221,21 @@ def get_config() -> AppConfig:
         AudioRipSettings(),
         audio_rip_data if isinstance(audio_rip_data, dict) else None,
     )
+    accuraterip = _merge(
+        AccurateRipSettings(),
+        accuraterip_data if isinstance(accuraterip_data, dict) else None,
+    )
     ui = _merge(
         UiPreferences(),
         ui_data if isinstance(ui_data, dict) else None,
     )
 
-    return AppConfig(media_size=media_size, audio_rip=audio_rip, ui=ui)
+    return AppConfig(
+        media_size=media_size,
+        audio_rip=audio_rip,
+        accuraterip=accuraterip,
+        ui=ui,
+    )
 
 
 def _toml_format_value(value: Any) -> str:
