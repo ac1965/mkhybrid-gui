@@ -11,12 +11,14 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
@@ -57,7 +59,11 @@ from mkhybrid_gui.metadata import (
     TrackMetadata,
     sanitize_filename_component,
 )
-from mkhybrid_gui.musicbrainz import LookupResult, MetadataLookupWorker
+from mkhybrid_gui.musicbrainz import (
+    LookupResult,
+    MetadataLookupWorker,
+    ReleaseCandidate,
+)
 
 # ALACを先頭（既定・推奨）にした表示順
 _AUDIO_FORMAT_ORDER = [
@@ -75,6 +81,92 @@ _BREW_PACKAGES = {
     "flac": "flac",
     "cdrdao": "cdrdao",
 }
+
+
+class MusicBrainzCandidateDialog(QDialog):
+    """MusicBrainzで複数候補が見つかった場合の選択ダイアログ。
+
+    候補名（アーティスト・アルバム名・年・国等）の1行だけでは
+    似た候補（別リージョン盤・再発盤等）を見分けにくいため、選択中の
+    候補の全トラック名をその場でプレビュー表示する。
+    """
+
+    def __init__(
+        self,
+        candidates: list[ReleaseCandidate],
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("候補の選択")
+        self.resize(560, 360)
+
+        self._candidates = candidates
+
+        self.candidate_list = QListWidget()
+        for candidate in candidates:
+            self.candidate_list.addItem(candidate.display_label)
+
+        self.track_preview_table = QTableWidget(0, 2)
+        self.track_preview_table.setHorizontalHeaderLabels(["#", "タイトル"])
+        self.track_preview_table.horizontalHeader().setStretchLastSection(
+            True
+        )
+        self.track_preview_table.verticalHeader().setVisible(False)
+        self.track_preview_table.setEditTriggers(
+            QTableWidget.EditTrigger.NoEditTriggers
+        )
+
+        preview_layout = QVBoxLayout()
+        preview_layout.addWidget(QLabel("トラック一覧プレビュー:"))
+        preview_layout.addWidget(self.track_preview_table)
+
+        content_layout = QHBoxLayout()
+        content_layout.addWidget(self.candidate_list, 1)
+        content_layout.addLayout(preview_layout, 2)
+
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok
+            | QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(
+            QLabel(
+                f"{len(candidates)}件の候補が見つかりました。選んでください:"
+            )
+        )
+        layout.addLayout(content_layout)
+        layout.addWidget(button_box)
+
+        self.candidate_list.currentRowChanged.connect(
+            self._on_candidate_row_changed
+        )
+        if candidates:
+            self.candidate_list.setCurrentRow(0)
+
+    def _on_candidate_row_changed(self, row: int) -> None:
+        self.track_preview_table.setRowCount(0)
+
+        if row < 0 or row >= len(self._candidates):
+            return
+
+        tracks = self._candidates[row].album.tracks
+        self.track_preview_table.setRowCount(len(tracks))
+
+        for index, track in enumerate(tracks):
+            self.track_preview_table.setItem(
+                index, 0, QTableWidgetItem(str(index + 1))
+            )
+            self.track_preview_table.setItem(
+                index, 1, QTableWidgetItem(track.title or "(不明)")
+            )
+
+    def selected_index(self) -> int | None:
+        """選択中の候補のインデックスを返す（未選択なら``None``）。"""
+        row = self.candidate_list.currentRow()
+        return row if row >= 0 else None
 
 
 class MainWindow(QMainWindow):
@@ -781,23 +873,25 @@ class MainWindow(QMainWindow):
         if len(result.candidates) == 1:
             candidate = result.candidates[0]
         else:
-            labels = [c.display_label for c in result.candidates]
-            label, ok = QInputDialog.getItem(
-                self,
-                "候補の選択",
-                f"{len(labels)}件の候補が見つかりました。選んでください:",
-                labels,
-                0,
-                False,
-            )
+            dialog = MusicBrainzCandidateDialog(result.candidates, parent=self)
 
-            if not ok:
+            if dialog.exec() != QDialog.DialogCode.Accepted:
                 self.metadata_status_label.setText(
-                    f"{len(labels)}件見つかりましたが、選択されませんでした。"
+                    f"{len(result.candidates)}件見つかりましたが、"
+                    "選択されませんでした。"
                 )
                 return
 
-            candidate = result.candidates[labels.index(label)]
+            index = dialog.selected_index()
+
+            if index is None:
+                self.metadata_status_label.setText(
+                    f"{len(result.candidates)}件見つかりましたが、"
+                    "選択されませんでした。"
+                )
+                return
+
+            candidate = result.candidates[index]
 
         if self._has_existing_metadata_input():
             reply = QMessageBox.question(

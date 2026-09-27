@@ -1161,6 +1161,113 @@ def test_metadata_lookup_finished_applies_single_candidate(
     assert window.track_title_table.item(0, 1).text() == "Found Title"
 
 
+class _FakeCandidateDialog:
+    """``MusicBrainzCandidateDialog``のフェイク。実際のQDialogを表示・
+    ブロックさせず、``accepted``/``chosen_index``で選択結果を注入する。
+    """
+
+    def __init__(self, candidates, parent=None) -> None:
+        self.candidates = candidates
+
+    def exec(self) -> int:
+        from PySide6.QtWidgets import QDialog
+
+        return (
+            QDialog.DialogCode.Accepted
+            if _FakeCandidateDialog.accepted
+            else QDialog.DialogCode.Rejected
+        )
+
+    def selected_index(self):
+        return _FakeCandidateDialog.chosen_index
+
+    accepted = True
+    chosen_index: int | None = 0
+
+
+def test_metadata_lookup_finished_applies_selected_candidate_from_dialog(
+    qtbot,
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """複数候補が見つかった場合、選択ダイアログで選んだ候補
+    （先頭とは限らない）が反映されることを確認する。
+    """
+    from mkhybrid_gui.metadata import TrackMetadata
+
+    monkeypatch.setattr(
+        main_window_module,
+        "query_disc_toc",
+        lambda device: DiscToc(track_offsets=[0], leadout_offset=1000),
+    )
+    window.show()
+    _select_volume(window, _audio_volume())
+
+    first_candidate = ReleaseCandidate(
+        album=AlbumMetadata(album="First Album", artist="First Artist")
+    )
+    second_candidate = ReleaseCandidate(
+        album=AlbumMetadata(
+            album="Second Album",
+            artist="Second Artist",
+            year="2010",
+            tracks=[TrackMetadata(title="Second Title")],
+        ),
+        country="JP",
+    )
+
+    _FakeCandidateDialog.accepted = True
+    _FakeCandidateDialog.chosen_index = 1
+    monkeypatch.setattr(
+        main_window_module, "MusicBrainzCandidateDialog", _FakeCandidateDialog
+    )
+
+    window._on_metadata_lookup_finished(
+        LookupResult(candidates=[first_candidate, second_candidate])
+    )
+
+    assert window.album_edit.text() == "Second Album"
+    assert window.artist_edit.text() == "Second Artist"
+    assert window.track_title_table.item(0, 1).text() == "Second Title"
+
+
+def test_metadata_lookup_finished_dialog_cancelled_shows_status(
+    qtbot,
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """複数候補の選択ダイアログをキャンセルした場合、入力欄は変更せず
+    ステータス表示のみ更新する。
+    """
+    monkeypatch.setattr(
+        main_window_module,
+        "query_disc_toc",
+        lambda device: DiscToc(track_offsets=[0], leadout_offset=1000),
+    )
+    window.show()
+    _select_volume(window, _audio_volume())
+
+    first_candidate = ReleaseCandidate(
+        album=AlbumMetadata(album="First Album", artist="First Artist")
+    )
+    second_candidate = ReleaseCandidate(
+        album=AlbumMetadata(album="Second Album", artist="Second Artist")
+    )
+
+    _FakeCandidateDialog.accepted = False
+    _FakeCandidateDialog.chosen_index = None
+    monkeypatch.setattr(
+        main_window_module, "MusicBrainzCandidateDialog", _FakeCandidateDialog
+    )
+
+    window._on_metadata_lookup_finished(
+        LookupResult(candidates=[first_candidate, second_candidate])
+    )
+
+    assert window.album_edit.text() == ""
+    assert "選択されませんでした" in window.metadata_status_label.text()
+
+
 def test_metadata_lookup_finished_with_no_candidates_shows_status(
     qtbot,
     window: MainWindow,
@@ -1619,3 +1726,61 @@ def test_close_event_also_saves_settings_tab_values(
     window.closeEvent(QCloseEvent())
 
     assert config.get_config().media_size.cd_max_bytes == 42_000_000
+
+
+# --- MusicBrainzCandidateDialog -----------------------------------------
+
+
+def test_candidate_dialog_previews_selected_candidate_tracks(qtbot) -> None:
+    """候補を切り替えると、右側のトラック一覧プレビューが選択中の
+    候補のものに更新されることを確認する。
+    """
+    from mkhybrid_gui.metadata import TrackMetadata
+    from mkhybrid_gui.ui.main_window import MusicBrainzCandidateDialog
+
+    first_candidate = ReleaseCandidate(
+        album=AlbumMetadata(
+            album="First Album",
+            artist="First Artist",
+            tracks=[TrackMetadata(title="First Track 1")],
+        )
+    )
+    second_candidate = ReleaseCandidate(
+        album=AlbumMetadata(
+            album="Second Album",
+            artist="Second Artist",
+            tracks=[
+                TrackMetadata(title="Second Track 1"),
+                TrackMetadata(title="Second Track 2"),
+            ],
+        )
+    )
+
+    dialog = MusicBrainzCandidateDialog([first_candidate, second_candidate])
+    qtbot.addWidget(dialog)
+
+    assert dialog.selected_index() == 0
+    assert dialog.track_preview_table.rowCount() == 1
+    assert dialog.track_preview_table.item(0, 1).text() == "First Track 1"
+
+    dialog.candidate_list.setCurrentRow(1)
+
+    assert dialog.selected_index() == 1
+    assert dialog.track_preview_table.rowCount() == 2
+    assert dialog.track_preview_table.item(1, 1).text() == "Second Track 2"
+
+
+def test_candidate_dialog_shows_placeholder_for_untitled_tracks(qtbot) -> None:
+    from mkhybrid_gui.metadata import TrackMetadata
+    from mkhybrid_gui.ui.main_window import MusicBrainzCandidateDialog
+
+    candidate = ReleaseCandidate(
+        album=AlbumMetadata(
+            album="Album", artist="Artist", tracks=[TrackMetadata(title="")]
+        )
+    )
+
+    dialog = MusicBrainzCandidateDialog([candidate])
+    qtbot.addWidget(dialog)
+
+    assert dialog.track_preview_table.item(0, 1).text() == "(不明)"
