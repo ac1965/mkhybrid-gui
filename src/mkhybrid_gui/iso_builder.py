@@ -14,7 +14,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from mkhybrid_gui.subprocess_utils import SAFE_SUBPROCESS_KWARGS, resolve_command
+from mkhybrid_gui.subprocess_utils import (
+    SAFE_SUBPROCESS_KWARGS,
+    resolve_command,
+    terminate_with_escalation,
+)
 
 ProgressCallback = Callable[[str], None]
 ProgressPercentCallback = Callable[[int], None]
@@ -530,13 +534,16 @@ if QThread is not None:
 
             GUIスレッドから呼び出される想定。実行中のプロセスへ
             ``terminate`` を送ることで、ブロッキングしている出力読み取り
-            ループを速やかに終了させる。
+            ループを速やかに終了させる。``terminate`` を無視するコマンド
+            が相手でもハングし続けないよう、一定時間後に ``kill`` へ
+            自動的にエスカレーションする（``terminate_with_escalation``、
+            詳細は ``subprocess_utils`` モジュールのdocstringを参照）。
             """
             self._cancel_requested = True
 
             process = self._process
             if process is not None and process.poll() is None:
-                process.terminate()
+                terminate_with_escalation(process)
 
         def _capture_process(self, process: subprocess.Popen[str]) -> None:
             self._process = process

@@ -39,7 +39,11 @@ from pathlib import Path
 
 from mkhybrid_gui import audio_cd
 from mkhybrid_gui.audio_cd import command_env, tool_path
-from mkhybrid_gui.subprocess_utils import SAFE_SUBPROCESS_KWARGS, resolve_command
+from mkhybrid_gui.subprocess_utils import (
+    SAFE_SUBPROCESS_KWARGS,
+    resolve_command,
+    terminate_with_escalation,
+)
 
 ProgressCallback = Callable[[str], None]
 ProcessStartedCallback = Callable[["subprocess.Popen[str]"], None]
@@ -368,12 +372,18 @@ if QThread is not None:
             self._cancel_requested = False
 
         def request_cancel(self) -> None:
-            """実行中の``cdrdao``プロセスを安全に中断する。"""
+            """実行中の``cdrdao``プロセスを安全に中断する。
+
+            ``terminate``を無視するコマンドが相手でもハングし続けない
+            よう、一定時間後に``kill``へ自動的にエスカレーションする
+            （``terminate_with_escalation``、詳細は``subprocess_utils``
+            モジュールのdocstringを参照）。
+            """
             self._cancel_requested = True
 
             process = self._process
             if process is not None and process.poll() is None:
-                process.terminate()
+                terminate_with_escalation(process)
 
         def _capture_process(self, process: subprocess.Popen[str]) -> None:
             self._process = process

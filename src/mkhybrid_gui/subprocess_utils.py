@@ -29,15 +29,28 @@ Network.frameworkの子側atforkハンドラ内でのクラッシュであるこ
 `subprocess.run`/`subprocess.Popen`呼び出しは、必ずこのモジュールの
 `resolve_command`を経由してコマンド名を絶対パスに解決し、
 `close_fds=False`を指定すること。
+
+`terminate_with_escalation`は別の関心事（中断処理の安全性）を扱う。
+`IsoWorker`/`AudioRipWorker`/`CdrdaoWorker`の`request_cancel()`は
+実行中プロセスへ`terminate()`（SIGTERM）を送るが、コマンドが
+シグナルを無視・処理に時間がかかる場合、出力読み取りループが
+ハングし続けGUIが閉じられなくなる。一定時間後に`kill()`
+（SIGKILL）へ自動的にエスカレーションすることで、この既知の制限
+（README.mdの「ロードマップ・既知の制限」を参照）を解消する。
 """
 
 from __future__ import annotations
 
 import shutil
+import subprocess
+import threading
 
 #: `posix_spawn()`の安全な高速パスを使うために、すべての外部コマンド
 #: 実行で指定すること。このモジュールのdocstringを参照。
 SAFE_SUBPROCESS_KWARGS: dict[str, bool] = {"close_fds": False}
+
+#: `terminate_with_escalation()`の既定のエスカレーション猶予秒数。
+DEFAULT_TERMINATE_ESCALATION_SECONDS = 5.0
 
 
 def resolve_executable(name: str, path: str | None = None) -> str:
@@ -65,3 +78,29 @@ def resolve_command(cmd: list[str], path: str | None = None) -> list[str]:
         return cmd
 
     return [resolve_executable(cmd[0], path=path), *cmd[1:]]
+
+
+def terminate_with_escalation(
+    process: subprocess.Popen[str],
+    timeout: float = DEFAULT_TERMINATE_ESCALATION_SECONDS,
+) -> None:
+    """プロセスへ``SIGTERM``を送り、``timeout``秒経っても終了しない
+    場合は``SIGKILL``へエスカレーションする。
+
+    ``SIGTERM``を無視する（あるいは終了処理に時間がかかる）外部
+    コマンドが相手だと、``terminate()``を送るだけではワーカー
+    スレッドが出力読み取りループでハングし続け、GUIが
+    ``closeEvent``のガードにより永久に閉じられなくなる（README.md
+    の「ロードマップ・既知の制限」を参照）。エスカレーションの監視は
+    バックグラウンドの``threading.Timer``で行うため、呼び出し元
+    （通常はGUIスレッド）をブロックしない。
+    """
+    process.terminate()
+
+    def _escalate() -> None:
+        if process.poll() is None:
+            process.kill()
+
+    timer = threading.Timer(timeout, _escalate)
+    timer.daemon = True
+    timer.start()

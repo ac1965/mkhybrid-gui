@@ -55,7 +55,11 @@ from mkhybrid_gui.metadata import (
     compute_disc_id,
     sanitize_filename_component,
 )
-from mkhybrid_gui.subprocess_utils import SAFE_SUBPROCESS_KWARGS, resolve_command
+from mkhybrid_gui.subprocess_utils import (
+    SAFE_SUBPROCESS_KWARGS,
+    resolve_command,
+    terminate_with_escalation,
+)
 
 #: CD-DA（音楽CD）固定のPCMフォーマット。AccurateRip照合用のサンプル
 #: 読み込み（``read_pcm_samples``）が前提とする値。
@@ -1158,13 +1162,16 @@ if QThread is not None:
             GUIスレッドから呼び出される想定。次にトラック/試行の境界へ
             達した時点で処理を打ち切るほか、実行中のプロセスへも
             ``terminate`` を送り、ブロッキングしている出力読み取りを
-            速やかに終了させる。
+            速やかに終了させる。``terminate`` を無視するコマンドが
+            相手でもハングし続けないよう、一定時間後に ``kill`` へ
+            自動的にエスカレーションする（``terminate_with_escalation``、
+            詳細は ``subprocess_utils`` モジュールのdocstringを参照）。
             """
             self._cancel_requested = True
 
             process = self._process
             if process is not None and process.poll() is None:
-                process.terminate()
+                terminate_with_escalation(process)
 
         def _capture_process(self, process: subprocess.Popen[str]) -> None:
             self._process = process
