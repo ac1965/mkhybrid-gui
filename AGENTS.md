@@ -173,6 +173,7 @@ make distclean  # clean に加えて .venv も削除
 - `audio_cd.py` は実際の音楽CD・cd-paranoia/afconvert/flacバイナリを使わず、`subprocess.run`/`subprocess.Popen` をモック化してトラック数解析・コマンド組み立て・検証ロジック（複数回読み取りの一致判定）・変換処理を検証する。ただし `write_metadata_tags`（`mutagen`）は外部バイナリに依存しない純Pythonのため、モックせず実際に妥当なフォーマットの最小限のファイル（`wave`標準モジュールやバイト列を直接組み立てて生成、Homebrew依存の`flac`バイナリや非推奨の`aifc`モジュールは使わない）を用意してタグの読み書きをテストする。
 - `metadata.py` の `compute_disc_id` は、実際にMusicBrainz APIへ問い合わせて確認した実データ（disc id・offsets・sectors）をテストベクタとして使う（当てずっぽうの値やlibdiscid由来の値を使わない）。
 - `musicbrainz.py` は実ネットワークを使わず、`url_opener` を差し替えたフェイクレスポンスで正常系（0/1/複数件）・HTTPエラー・タイムアウト・不正JSONを検証する。
+- `accuraterip.py`（`compute_ids`/`build_query_url`/`lookup`）も同様に実ネットワークを使わず、`url_opener`を差し替えたフェイクバイナリレスポンス（`_HEADER_STRUCT`/`_ENTRY_STRUCT`と同じ構造で自作）で検証する（`tests/test_accuraterip.py`）。`compute_ids`のテストベクタは、実際のAccurateRipサーバーで確認した実データではなく、実装済みの計算式から手計算で導出した自作TOCによるspec-conformanceテストである点に注意（元になった実データの生TOCは保存されておらず再現できないため。次に実機で確認する機会があれば、実データによるテストベクタに置き換えることが望ましい）。`metadata.compute_disc_id`（MusicBrainz、`LEAD_IN_FRAMES`加算あり）とオフセット規約が異なることを直接検証するテストも含む。
 - GUI部分のテストには `pytest-qt`（`qtbot`）を用いる（[tests/test_main_window.py](tests/test_main_window.py)）。`IsoWorker`/`AudioRipWorker`/`MetadataLookupWorker`は実際に起動せず、`list_volumes`/`query_disc_toc`/`missing_tools`等の呼び出し境界をモック化し、ウィジェットの表示切り替え・入力検証・状態管理のロジックのみを検証する。`QMessageBox`はモーダルダイアログのためstaticメソッドを差し替え、テストがブロックされないようにする。ワーカースレッドを実際に起動して完了まで待つ結合テストは対象外（README.md の「ロードマップ・既知の制限」で追跡している）。
 - 実機（実CD-ROM/DVD/BD/音楽CD）を使った結合テストはCI対象外とし、手動確認手順をREADMEに記載する。
 
