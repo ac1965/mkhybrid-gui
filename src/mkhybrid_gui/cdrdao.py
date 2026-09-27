@@ -37,7 +37,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from mkhybrid_gui import audio_cd
 from mkhybrid_gui.audio_cd import command_env, tool_path
+from mkhybrid_gui.subprocess_utils import SAFE_SUBPROCESS_KWARGS, resolve_command
 
 ProgressCallback = Callable[[str], None]
 ProcessStartedCallback = Callable[["subprocess.Popen[str]"], None]
@@ -76,13 +78,20 @@ def _run_streaming(
     on_progress: ProgressCallback | None,
     on_process_started: ProcessStartedCallback | None = None,
 ) -> CommandResult:
-    """外部コマンドをPATH引き継ぎ環境で実行する。"""
+    """外部コマンドをPATH引き継ぎ環境で実行する。
+
+    ``resolve_command``/``SAFE_SUBPROCESS_KWARGS``で実行ファイルを
+    絶対パスに解決し``close_fds=False``を指定する。GUIアプリ
+    （マルチスレッドのQtプロセス）から`fork()`する際のクラッシュ回避に
+    必須（詳細は``subprocess_utils``モジュールのdocstringを参照）。
+    """
     proc = subprocess.Popen(
-        cmd,
+        resolve_command(cmd, path=audio_cd.effective_path()),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         env=command_env(),
+        **SAFE_SUBPROCESS_KWARGS,
     )
 
     if on_process_started is not None:
@@ -119,11 +128,12 @@ def scan_bus() -> str:
     ``Cannot setup device``で失敗する）。
     """
     result = subprocess.run(
-        ["cdrdao", "scanbus"],
+        resolve_command(["cdrdao", "scanbus"], path=audio_cd.effective_path()),
         capture_output=True,
         text=True,
         check=False,
         env=command_env(),
+        **SAFE_SUBPROCESS_KWARGS,
     )
     return result.stdout + result.stderr
 

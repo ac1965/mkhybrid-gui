@@ -14,6 +14,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from mkhybrid_gui.subprocess_utils import SAFE_SUBPROCESS_KWARGS, resolve_command
+
 ProgressCallback = Callable[[str], None]
 ProgressPercentCallback = Callable[[int], None]
 ProcessStartedCallback = Callable[["subprocess.Popen[str]"], None]
@@ -133,9 +135,10 @@ def _extract_attached_device(output: str) -> str | None:
 def _device_info(device: str) -> dict | None:
     """``diskutil info -plist`` からアタッチ済みデバイスの情報を取得する。"""
     result = subprocess.run(
-        ["diskutil", "info", "-plist", device],
+        resolve_command(["diskutil", "info", "-plist", device]),
         capture_output=True,
         check=False,
+        **SAFE_SUBPROCESS_KWARGS,
     )
 
     if result.returncode != 0:
@@ -414,13 +417,20 @@ def _run_streaming(
     on_percent: ProgressPercentCallback | None = None,
     on_process_started: ProcessStartedCallback | None = None,
 ) -> CommandResult:
-    """外部コマンドを実行し、出力をリアルタイムに通知する。"""
+    """外部コマンドを実行し、出力をリアルタイムに通知する。
+
+    ``resolve_command``/``SAFE_SUBPROCESS_KWARGS``で実行ファイルを
+    絶対パスに解決し``close_fds=False``を指定する。これはGUIアプリ
+    （マルチスレッドのQtプロセス）から`fork()`する際のクラッシュ回避に
+    必須（詳細は``subprocess_utils``モジュールのdocstringを参照）。
+    """
     proc = subprocess.Popen(
-        cmd,
+        resolve_command(cmd),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        **SAFE_SUBPROCESS_KWARGS,
     )
 
     if on_process_started is not None:

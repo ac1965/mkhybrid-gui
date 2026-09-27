@@ -55,6 +55,7 @@ from mkhybrid_gui.metadata import (
     compute_disc_id,
     sanitize_filename_component,
 )
+from mkhybrid_gui.subprocess_utils import SAFE_SUBPROCESS_KWARGS, resolve_command
 
 #: CD-DA（音楽CD）固定のPCMフォーマット。AccurateRip照合用のサンプル
 #: 読み込み（``read_pcm_samples``）が前提とする値。
@@ -141,11 +142,12 @@ def effective_path() -> str:
 
     try:
         result = subprocess.run(
-            [shell, "-lc", 'printf "%s" "$PATH"'],
+            resolve_command([shell, "-lc", 'printf "%s" "$PATH"']),
             capture_output=True,
             text=True,
             check=True,
             env=os.environ.copy(),
+            **SAFE_SUBPROCESS_KWARGS,
         )
         shell_path = result.stdout.strip()
     except (OSError, subprocess.SubprocessError):
@@ -203,13 +205,20 @@ def _run_streaming(
     on_progress: ProgressCallback | None,
     on_process_started: ProcessStartedCallback | None = None,
 ) -> CommandResult:
-    """外部コマンドをPATH引き継ぎ環境で実行する。"""
+    """外部コマンドをPATH引き継ぎ環境で実行する。
+
+    ``resolve_command``/``SAFE_SUBPROCESS_KWARGS``で実行ファイルを
+    絶対パスに解決し``close_fds=False``を指定する。GUIアプリ
+    （マルチスレッドのQtプロセス）から`fork()`する際のクラッシュ回避に
+    必須（詳細は``subprocess_utils``モジュールのdocstringを参照）。
+    """
     proc = subprocess.Popen(
-        cmd,
+        resolve_command(cmd, path=effective_path()),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         env=command_env(),
+        **SAFE_SUBPROCESS_KWARGS,
     )
 
     if on_process_started is not None:
@@ -263,11 +272,12 @@ def query_track_count(device: str | None = None) -> int:
         )
 
     result = subprocess.run(
-        cmd,
+        resolve_command(cmd, path=effective_path()),
         capture_output=True,
         text=True,
         check=False,
         env=command_env(),
+        **SAFE_SUBPROCESS_KWARGS,
     )
 
     # cd-paranoia -Q は正常時でも終了コードが0以外になることがあるため、
@@ -365,11 +375,12 @@ def query_disc_toc(device: str | None = None) -> DiscToc:
         )
 
     result = subprocess.run(
-        cmd,
+        resolve_command(cmd, path=effective_path()),
         capture_output=True,
         text=True,
         check=False,
         env=command_env(),
+        **SAFE_SUBPROCESS_KWARGS,
     )
 
     return parse_disc_toc(result.stderr + result.stdout)

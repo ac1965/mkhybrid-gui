@@ -35,6 +35,17 @@ from mkhybrid_gui.audio_cd import (
     write_metadata_tags,
 )
 from mkhybrid_gui.metadata import AlbumMetadata, TrackMetadata
+from mkhybrid_gui.subprocess_utils import SAFE_SUBPROCESS_KWARGS, resolve_command
+
+def _norm(cmd: list[str]) -> list[str]:
+    """先頭要素（実行ファイル）が絶対パスに解決されていても比較できるよう、
+    コマンド名部分をbasenameに正規化する（``subprocess_utils.resolve_command``
+    により、実行時のコマンドは絶対パスへ解決されるため）。
+    """
+    if not cmd:
+        return cmd
+    return [Path(cmd[0]).name, *cmd[1:]]
+
 
 SAMPLE_QUERY_OUTPUT = """\
 cdparanoia III release 10.2 (December 22, 2008)
@@ -424,7 +435,7 @@ def test_rip_track_verified_accepts_matching_second_read(
     assert result.attempts == 2
     assert result.wav_path.read_bytes() == b"AAA"
 
-    assert _FakeRipPopen.commands[0] == [
+    assert _norm(_FakeRipPopen.commands[0]) == [
         "cd-paranoia",
         "1",
         str(tmp_path / "track01.attempt1.wav"),
@@ -884,13 +895,22 @@ def _build_minimal_aiff(path: Path) -> None:
 
 
 def _build_minimal_m4a(path: Path) -> None:
-    """``afconvert``（macOS標準コマンド）で最小限のALAC/.m4aを生成する。"""
+    """``afconvert``（macOS標準コマンド）で最小限のALAC/.m4aを生成する。
+
+    実行ファイルを絶対パスで渡し``close_fds=False``を指定する
+    （``subprocess_utils``参照）。テスト実行プロセスはPySide6（Qt）を
+    ロードしたマルチスレッドプロセスであり、この対策が無いと
+    ``afconvert``がfork直後にクラッシュすることを実機で確認済み。
+    """
     wav_path = path.with_suffix(".src.wav")
     _build_minimal_wav(wav_path)
     subprocess.run(
-        ["afconvert", "-f", "m4af", "-d", "alac", str(wav_path), str(path)],
+        resolve_command(
+            ["afconvert", "-f", "m4af", "-d", "alac", str(wav_path), str(path)]
+        ),
         check=True,
         capture_output=True,
+        **SAFE_SUBPROCESS_KWARGS,
     )
 
 

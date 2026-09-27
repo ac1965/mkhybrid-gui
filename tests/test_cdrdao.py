@@ -20,6 +20,14 @@ from mkhybrid_gui.cdrdao import (
     rip_disc_image,
 )
 
+
+def _norm(cmd: list[str]) -> list[str]:
+    """``resolve_command``による絶対パス解決の有無に関わらず比較できる
+    よう、コマンド先頭要素をベース名に正規化する。"""
+    if not cmd:
+        return cmd
+    return [Path(cmd[0]).name, *cmd[1:]]
+
 # 実機（ASUS SDRW-08U9M-U、USB接続）の ``cdrdao scanbus`` 実行結果。
 SAMPLE_SCANBUS_OUTPUT = (
     "IOService:/AppleARMPE/arm-io@10F00000/AppleH16GFamilyIO/"
@@ -73,7 +81,7 @@ def test_scan_bus_combines_stdout_and_stderr(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fake_run(cmd, **kwargs):
-        assert cmd == ["cdrdao", "scanbus"]
+        assert _norm(cmd) == ["cdrdao", "scanbus"]
 
         class FakeCompletedProcess:
             stdout = "line-from-stdout\n"
@@ -250,13 +258,13 @@ def test_rip_disc_image_with_cue_generates_cue_and_swapped_bin(
 ) -> None:
     class _FakePopen:
         def __init__(self, cmd, **kwargs):
-            if cmd[0] == "cdrdao":
+            if Path(cmd[0]).name == "cdrdao":
                 bin_path = Path(cmd[cmd.index("--datafile") + 1])
                 toc_path = Path(cmd[-1])
                 bin_path.write_bytes(b"fake-bin-data")
                 toc_path.write_text("CD_DA\n")
                 self.stdout = iter(["Analyzing...\n"])
-            elif cmd[0] == "toc2cue":
+            elif Path(cmd[0]).name == "toc2cue":
                 swapped_bin_path = Path(cmd[cmd.index("-C") + 1])
                 cue_path = Path(cmd[-1])
                 swapped_bin_path.write_bytes(b"fake-swapped-bin-data")
@@ -301,14 +309,14 @@ def test_rip_disc_image_cue_failure_does_not_fail_whole_result(
 
     class _FakePopen:
         def __init__(self, cmd, **kwargs):
-            if cmd[0] == "cdrdao":
+            if Path(cmd[0]).name == "cdrdao":
                 bin_path = Path(cmd[cmd.index("--datafile") + 1])
                 toc_path = Path(cmd[-1])
                 bin_path.write_bytes(b"fake-bin-data")
                 toc_path.write_text("CD_DA\n")
                 self.stdout = iter([])
                 self._returncode = 0
-            elif cmd[0] == "toc2cue":
+            elif Path(cmd[0]).name == "toc2cue":
                 self.stdout = iter(["ERROR: something went wrong\n"])
                 self._returncode = 1
             else:
@@ -435,12 +443,12 @@ def test_cdrdao_worker_reports_cue_path_when_generate_cue_enabled(
 ) -> None:
     class _FakePopen:
         def __init__(self, cmd, **kwargs):
-            if cmd[0] == "cdrdao":
+            if Path(cmd[0]).name == "cdrdao":
                 bin_path = Path(cmd[cmd.index("--datafile") + 1])
                 toc_path = Path(cmd[-1])
                 bin_path.write_bytes(b"fake")
                 toc_path.write_text("CD_DA\n")
-            elif cmd[0] == "toc2cue":
+            elif Path(cmd[0]).name == "toc2cue":
                 swapped_bin_path = Path(cmd[cmd.index("-C") + 1])
                 cue_path = Path(cmd[-1])
                 swapped_bin_path.write_bytes(b"fake-swapped")

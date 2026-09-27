@@ -14,6 +14,7 @@ from enum import Enum
 from typing import Any
 
 from mkhybrid_gui.config import get_config
+from mkhybrid_gui.subprocess_utils import SAFE_SUBPROCESS_KWARGS, resolve_command
 
 
 class DiskUtilError(RuntimeError):
@@ -75,9 +76,10 @@ def unmount_disk(device_identifier: str) -> bool:
     """
     whole_disk = _whole_disk_identifier(device_identifier)
     result = subprocess.run(
-        ["diskutil", "unmountDisk", f"/dev/{whole_disk}"],
+        resolve_command(["diskutil", "unmountDisk", f"/dev/{whole_disk}"]),
         capture_output=True,
         check=False,
+        **SAFE_SUBPROCESS_KWARGS,
     )
     return result.returncode == 0
 
@@ -90,9 +92,10 @@ def mount_disk(device_identifier: str) -> bool:
     """
     whole_disk = _whole_disk_identifier(device_identifier)
     result = subprocess.run(
-        ["diskutil", "mountDisk", f"/dev/{whole_disk}"],
+        resolve_command(["diskutil", "mountDisk", f"/dev/{whole_disk}"]),
         capture_output=True,
         check=False,
+        **SAFE_SUBPROCESS_KWARGS,
     )
     return result.returncode == 0
 
@@ -255,9 +258,10 @@ def get_disk_info(device_identifier: str) -> dict[str, Any] | None:
     コマンド失敗・plist解析失敗時は ``None`` を返す。
     """
     result = subprocess.run(
-        ["diskutil", "info", "-plist", f"/dev/{device_identifier}"],
+        resolve_command(["diskutil", "info", "-plist", f"/dev/{device_identifier}"]),
         capture_output=True,
         check=False,
+        **SAFE_SUBPROCESS_KWARGS,
     )
 
     if result.returncode != 0:
@@ -401,9 +405,10 @@ def list_volumes(*, mounted_only: bool = True) -> list[Volume]:
         GUIの通常利用ではこの値を使用する。
     """
     result = subprocess.run(
-        ["diskutil", "list", "-plist"],
+        resolve_command(["diskutil", "list", "-plist"]),
         capture_output=True,
         check=False,
+        **SAFE_SUBPROCESS_KWARGS,
     )
 
     if result.returncode != 0:

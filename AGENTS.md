@@ -17,6 +17,7 @@
   - コマンド名とHomebrewパッケージ名が一致しない（`cd-paranoia` ⇔ `libcdio-paranoia`）ため、パッケージ名を書く箇所では取り違えないこと。対応表は [main_window.py](src/mkhybrid_gui/ui/main_window.py) の `_BREW_PACKAGES` を参照。
 - **追加の外部依存（PyPI）**: [`mutagen`](https://mutagen.readthedocs.io/)（音楽ファイルへのタグ書き込みに必須。`pyproject.toml` の `dependencies` に含まれ、Homebrewではなく `pip install -e ".[dev]"` で導入される）。純Python実装で外部バイナリに依存しない。ネットワーク通信自体は標準ライブラリの `urllib.request` のみを使い、`musicbrainz.py` のために追加パッケージを導入しない（新たな依存を増やす前に、まず標準ライブラリで足りないか検討すること）。
 - **外部コマンドの解決（PATH）**: GUIアプリとして（Finder等から）起動された場合でも、macOS/launchdはプロセスに `/usr/bin:/bin:/usr/sbin:/sbin` 程度の最小限の`PATH`を設定するため、`PATH`が非空であることは「必要なコマンドが見つかる」ことを意味しない。[audio_cd.py](src/mkhybrid_gui/audio_cd.py) の `effective_path()` は、`PATH`の空/非空にかかわらず**常に**ログインシェルの`PATH`（Homebrewのインストール先を含む）を取得してプロセスの`PATH`とマージする。「`PATH`が空の場合だけログインシェルを問い合わせる」という条件分岐に戻すと、GUI起動時にHomebrewのコマンドが見つからなくなる回帰バグになるため、変更する際は必ずこの前提を守ること。この関数は先頭アンダースコアを付けない公開関数であり（`tool_path()`/`command_env()`も同様）、Homebrewインストールのコマンドに依存する他のモジュール（[cdrdao.py](src/mkhybrid_gui/cdrdao.py)）からも再利用する。同じPATH解決ロジックを他モジュールで再実装しないこと（過去に回帰した実績のある箇所を2箇所に増やさないため）。
+- **`subprocess`呼び出しのクラッシュ安全性（実機で確認済み）**: 本アプリ（マルチスレッドで動作するPySide6/Qtプロセス）内で外部コマンドをバレ名（例: `["afconvert", ...]`）かつ`close_fds`省略（既定`True`）で`subprocess.run`/`Popen`すると、CPythonの`subprocess`実装は`posix_spawn()`の高速パス条件（実行ファイルが絶対/相対パスであること・`close_fds=False`であること等、`subprocess._execute_child`参照）を満たせず`fork()+exec()`にフォールバックする。QtDBus/QtNetwork（Apple Network.frameworkの`pthread_atfork`ハンドラを登録済み）をロード済みのマルチスレッドプロセスを`fork()`すると、子プロセスが`exec()`前にクラッシュしうる（実機のクラッシュレポート `~/Library/Logs/DiagnosticReports/Python-*.ips` で `"*** multi-threaded process forked ***"` → `nw_settings_child_has_forked` 経由のSIGSEGVを確認済み。テストスイートの`test_write_metadata_tags_mp4`が`afconvert`呼び出しで再現性高くクラッシュしていた）。[subprocess_utils.py](src/mkhybrid_gui/subprocess_utils.py) の `resolve_command()`（`shutil.which`で絶対パスへ解決）+ `SAFE_SUBPROCESS_KWARGS`（`close_fds=False`）を経由することで`posix_spawn()`の安全なパスを使わせる。アプリ内の`subprocess.run`/`Popen`呼び出しは（テストコードのモック対象を除き）例外なくこの2つを併用すること。
 - **想定ユーザー**: 社内配布用メディアの作成を行う非エンジニアも含む担当者。CLIを意識させず、GUIから完結させる。
 
 ## 技術スタック
@@ -193,6 +194,7 @@ make distclean  # clean に加えて .venv も削除
 
 - Windows/Linux上での動作を前提にしたコード分岐を追加しない（本ツールはmacOS専用）。
 - `hdiutil`/`diskutil` の出力形式変更に備え、テキストパースではなく `-plist` 出力（`plistlib`でパース）を優先する。
+- 新規・既存を問わず`subprocess.run`/`subprocess.Popen`をバレのコマンド名（例: `["diskutil", ...]`）かつ`close_fds`省略のまま呼び出さない。[subprocess_utils.py](src/mkhybrid_gui/subprocess_utils.py)の`resolve_command()`（絶対パス解決）と`SAFE_SUBPROCESS_KWARGS`（`close_fds=False`）を必ず併用すること。省略すると、本アプリのようなマルチスレッドQtプロセスからの`fork()`がクラッシュしうる（実機のクラッシュレポートで確認済み、詳細は「技術スタック」の該当項目を参照）。同じ理由でテストのPopenモック呼び出しを比較する際も、絶対パス解決後のコマンド（`cmd[0]`が`/opt/homebrew/bin/xxx`等になりうる）を前提にアサーションを書くこと（`_norm()`ヘルパーで先頭要素をベース名に正規化して比較する既存パターンを参照）。
 - ユーザーの許可なくディスクのアンマウント・イジェクトを自動実行しない（GUI上で明示的な確認ダイアログを挟むこと）。
 - BDXL・M-DISCを専用のメディア種別として個別分岐しない（通常のBD/DVDと同じ経路で処理できるため、サイズベースの判定に任せる）。
 - `cd-paranoia` に `-Z`（パラノイア無効化）を指定しない。誤り訂正・再読込を無効化してしまい「正確なリッピング」の要件を満たせなくなる。

@@ -15,6 +15,7 @@
 | [audio-accurate-ripping.md](audio-accurate-ripping.md) | 音楽CD | `cd-paranoia`による正確なリッピング、自己一致検証、メタデータ・MusicBrainz連携 |
 | [cdrdao-disk-image.md](cdrdao-disk-image.md) | 音楽CD（追加オプション） | `cdrdao`によるTOC+BINディスクイメージバックアップ |
 | [accuraterip.md](accuraterip.md) | 音楽CD | AccurateRipオンラインDBとのCRC照合 |
+| [subprocess-safety.md](subprocess-safety.md) | 実装全体 | 外部コマンド呼び出しのクラッシュ安全性（`fork()`とマルチスレッドQtプロセスの相性問題、`subprocess_utils.py`による対策） |
 
 ## 全体構成
 
@@ -83,6 +84,12 @@ flowchart LR
 いずれのビジネスロジック層も、UIフレームワーク（PySide6）に依存しない
 設計とし、単体でテスト可能にする（詳細は各ファイルの`## テスト`節、
 または[AGENTS.md](../../AGENTS.md)の「テスト」節を参照）。
+
+`disk_utils.py`/`iso_builder.py`/`audio_cd.py`/`cdrdao.py`の全ての
+外部コマンド呼び出しは、共通ヘルパー`subprocess_utils.py`
+（`resolve_command()`/`SAFE_SUBPROCESS_KWARGS`）を経由する
+（[subprocess-safety.md](subprocess-safety.md)を参照。マルチスレッドの
+Qtプロセスから安全に`subprocess`を呼び出すための対策）。
 
 ## 実機検証を重視する開発方針
 

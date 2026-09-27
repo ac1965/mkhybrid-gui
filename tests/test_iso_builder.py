@@ -23,6 +23,17 @@ from mkhybrid_gui.iso_builder import (
 )
 
 
+def _norm(cmd: list[str]) -> list[str]:
+    """先頭要素（実行ファイル）が絶対パスに解決されていても比較できるよう、
+    コマンド名部分をbasenameに正規化する（``subprocess_utils.resolve_command``
+    により、実行時のコマンドは絶対パスへ解決されるため）。
+    """
+    if not cmd:
+        return cmd
+    from pathlib import Path as _Path
+    return [_Path(cmd[0]).name, *cmd[1:]]
+
+
 def test_build_makehybrid_command_default_options() -> None:
     cmd = build_makehybrid_command("/Volumes/SAMPLE_CD", "/tmp/out.iso")
 
@@ -198,7 +209,7 @@ def test_run_makehybrid_exposes_process_for_cancellation(
 
     assert result.ok is True
     assert len(captured) == 1
-    assert captured[0].cmd[:2] == ["hdiutil", "makehybrid"]
+    assert _norm(captured[0].cmd)[:2] == ["hdiutil", "makehybrid"]
 
 
 class _FakeCompletedProcess:
@@ -213,7 +224,7 @@ def _fake_diskutil_info_run(
     """``diskutil info -plist <device>`` をフェイクする ``subprocess.run``。"""
 
     def fake_run(cmd, **kwargs):
-        assert cmd[:2] == ["diskutil", "info"]
+        assert _norm(cmd)[:2] == ["diskutil", "info"]
         info = {"FilesystemType": filesystem_type}
         if mount_point is not None:
             info["MountPoint"] = mount_point
@@ -232,11 +243,11 @@ def _make_multi_step_popen(behaviors: dict[str, dict]):
     commands: list[list[str]] = []
 
     def _step_key(cmd: list[str]) -> str:
-        if cmd[:2] == ["hdiutil", "attach"]:
+        if _norm(cmd)[:2] == ["hdiutil", "attach"]:
             return "attach"
-        if cmd[:2] == ["diskutil", "verifyVolume"]:
+        if _norm(cmd)[:2] == ["diskutil", "verifyVolume"]:
             return "verifyVolume"
-        if cmd[:2] == ["hdiutil", "detach"]:
+        if _norm(cmd)[:2] == ["hdiutil", "detach"]:
             return "detach"
         raise AssertionError(f"想定外のコマンド: {cmd}")
 
@@ -276,13 +287,13 @@ def test_verify_iso_success_udf(monkeypatch: pytest.MonkeyPatch) -> None:
     result = verify_iso("/tmp/out.iso")
 
     assert result.ok is True
-    assert [cmd[:2] for cmd in commands] == [
+    assert [_norm(cmd)[:2] for cmd in commands] == [
         ["hdiutil", "attach"],
         ["diskutil", "verifyVolume"],
         ["hdiutil", "detach"],
     ]
-    assert commands[1] == ["diskutil", "verifyVolume", "/dev/disk5"]
-    assert commands[2] == ["hdiutil", "detach", "/dev/disk5"]
+    assert _norm(commands[1]) == ["diskutil", "verifyVolume", "/dev/disk5"]
+    assert _norm(commands[2]) == ["hdiutil", "detach", "/dev/disk5"]
 
 
 def test_verify_iso_detects_corrupted_udf_filesystem(
@@ -311,7 +322,7 @@ def test_verify_iso_detects_corrupted_udf_filesystem(
     assert result.ok is False
     assert "dirty" in result.stderr
     # 検証に失敗してもdetachは必ず実行される。
-    assert ["hdiutil", "detach", "/dev/disk5"] in commands
+    assert ["hdiutil", "detach", "/dev/disk5"] in [_norm(c) for c in commands]
 
 
 def test_verify_iso_iso9660_only_skips_verify_volume(
@@ -340,7 +351,7 @@ def test_verify_iso_iso9660_only_skips_verify_volume(
     assert result.ok is True
     # diskutil verifyVolumeは呼ばれない。
     assert ["diskutil", "verifyVolume"] not in [
-        cmd[:2] for cmd in commands
+        _norm(cmd)[:2] for cmd in commands
     ]
     assert any("検証には対応していません" in line for line in lines)
 
@@ -465,7 +476,7 @@ def test_verify_iso_iso9660_only_compares_contents_when_source_provided(
 
     assert result.ok is True
     assert ["diskutil", "verifyVolume"] not in [
-        cmd[:2] for cmd in commands
+        _norm(cmd)[:2] for cmd in commands
     ]
     assert any("一致しました" in line for line in lines)
 
@@ -534,7 +545,7 @@ def test_verify_iso_iso9660_only_falls_back_without_source(
 
     assert result.ok is True
     assert ["diskutil", "verifyVolume"] not in [
-        cmd[:2] for cmd in commands
+        _norm(cmd)[:2] for cmd in commands
     ]
     assert any("検証には対応していません" in line for line in lines)
 
@@ -557,7 +568,7 @@ def test_verify_iso_attach_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.ok is False
     assert "アタッチできませんでした" in result.stderr
     # attachに失敗した場合、detachは試みない。
-    assert ["hdiutil", "detach"] not in [cmd[:2] for cmd in commands]
+    assert ["hdiutil", "detach"] not in [_norm(cmd)[:2] for cmd in commands]
 
 
 def test_verify_iso_reports_100_percent_on_success(

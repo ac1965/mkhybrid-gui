@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import plistlib
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +19,14 @@ from mkhybrid_gui.disk_utils import (
     unmount_disk,
     whole_disk_raw_device,
 )
+
+
+def _norm(cmd: list[str]) -> list[str]:
+    """``resolve_command``による絶対パス解決の有無に関わらず比較できる
+    よう、コマンド先頭要素をベース名に正規化する。"""
+    if not cmd:
+        return cmd
+    return [Path(cmd[0]).name, *cmd[1:]]
 
 
 def test_whole_disk_raw_device_strips_partition_suffix() -> None:
@@ -41,7 +50,7 @@ def test_get_media_name_returns_media_name_field(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def fake_run(cmd, **kwargs):
-        assert cmd == ["diskutil", "info", "-plist", "/dev/disk4"]
+        assert _norm(cmd) == ["diskutil", "info", "-plist", "/dev/disk4"]
 
         class FakeCompletedProcess:
             returncode = 0
@@ -101,7 +110,7 @@ def test_unmount_disk_targets_whole_disk_and_reports_success(
     calls: list[list[str]] = []
 
     def fake_run(cmd, **kwargs):
-        calls.append(cmd)
+        calls.append(_norm(cmd))
 
         class FakeCompletedProcess:
             returncode = 0
@@ -138,7 +147,7 @@ def test_mount_disk_targets_whole_disk_and_reports_success(
     calls: list[list[str]] = []
 
     def fake_run(cmd, **kwargs):
-        calls.append(cmd)
+        calls.append(_norm(cmd))
 
         class FakeCompletedProcess:
             returncode = 0
@@ -244,12 +253,12 @@ def _fake_diskutil_run(
     disk_infos = disk_infos or {}
 
     def fake_run(cmd, **kwargs):
-        if cmd[:2] == ["diskutil", "list"]:
+        if _norm(cmd)[:2] == ["diskutil", "list"]:
             return FakeCompletedProcess(
                 plistlib.dumps(list_data)
             )
 
-        assert cmd[:2] == ["diskutil", "info"]
+        assert _norm(cmd)[:2] == ["diskutil", "info"]
 
         device = cmd[-1].removeprefix("/dev/")
 
