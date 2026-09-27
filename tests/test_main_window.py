@@ -1127,6 +1127,50 @@ def test_metadata_lookup_without_toc_warns(
     assert any(name == "warning" for name, _, _ in _no_modal_dialogs)
 
 
+class _FakeMetadataLookupWorker:
+    """``MetadataLookupWorker``のフェイク。実際のQThread起動・ネットワーク
+    通信を伴わず、``_on_metadata_lookup_clicked()``が渡した``disc_id``を
+    記録するだけに留める。
+    """
+
+    def __init__(self, disc_id: str, parent=None) -> None:
+        self.disc_id = disc_id
+
+        class _FakeSignal:
+            def connect(self, callback) -> None:
+                pass
+
+        self.finished_lookup = _FakeSignal()
+
+    def start(self) -> None:
+        pass
+
+
+def test_metadata_lookup_clicked_shows_disc_id_in_status(
+    window: MainWindow,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """「オンラインで検索」クリック時、問い合わせに使うDisc IDを
+    ステータス表示に明示することを確認する（検索結果が想定と異なる
+    場合に、どのDisc IDで検索したかをユーザー自身がMusicBrainzの
+    Webサイトで確認できるようにするため）。
+    """
+    from mkhybrid_gui.audio_cd import disc_id_from_disc_toc
+
+    disc_toc = DiscToc(track_offsets=[0, 1000], leadout_offset=2000)
+    window._disc_toc = disc_toc
+    expected_disc_id = disc_id_from_disc_toc(disc_toc)
+
+    monkeypatch.setattr(
+        main_window_module, "MetadataLookupWorker", _FakeMetadataLookupWorker
+    )
+
+    window._on_metadata_lookup_clicked()
+
+    assert window._last_metadata_disc_id == expected_disc_id
+    assert expected_disc_id in window.metadata_status_label.text()
+
+
 def test_metadata_lookup_finished_applies_single_candidate(
     qtbot,
     window: MainWindow,
@@ -1152,6 +1196,8 @@ def test_metadata_lookup_finished_applies_single_candidate(
         country="JP",
     )
 
+    window._last_metadata_disc_id = "fake-disc-id"
+
     window._on_metadata_lookup_finished(
         LookupResult(candidates=[candidate])
     )
@@ -1159,10 +1205,13 @@ def test_metadata_lookup_finished_applies_single_candidate(
     assert window.album_edit.text() == "Found Album"
     assert window.artist_edit.text() == "Found Artist"
     assert window.track_title_table.item(0, 1).text() == "Found Title"
-    # 1件のみ一致した旨（Disc IDはプレス版ごとに異なる、という理由）が
-    # ステータス表示に明示され、他の版が検索されなかった/見落とした
-    # ように誤解されないことを確認する。
+    # 1件のみ一致した旨（Disc IDはプレス版ごとに異なる、という理由）と、
+    # 検索に使ったDisc ID自体が、ステータス表示に明示されることを確認
+    # する。他の版が検索されなかった/見落としたように誤解されないため、
+    # また想定と異なる場合にユーザー自身がMusicBrainzのWebサイトで
+    # そのDisc IDを確認できるようにするため。
     assert "1件のみ一致" in window.metadata_status_label.text()
+    assert "fake-disc-id" in window.metadata_status_label.text()
 
 
 class _FakeCandidateDialog:

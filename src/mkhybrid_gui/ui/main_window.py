@@ -184,6 +184,7 @@ class MainWindow(QMainWindow):
         self._audio_work_tmpdir: tempfile.TemporaryDirectory[str] | None = None
         self._disc_toc: DiscToc | None = None
         self._metadata_lookup_worker: MetadataLookupWorker | None = None
+        self._last_metadata_disc_id: str | None = None
         self._last_output_directory = ""
         self._drive_option_note_shown = False
         #: cdrdao実行のためアンマウントしたディスクの識別子。
@@ -844,10 +845,11 @@ class MainWindow(QMainWindow):
             return
 
         disc_id = disc_id_from_disc_toc(self._disc_toc)
+        self._last_metadata_disc_id = disc_id
 
         self.metadata_lookup_button.setEnabled(False)
         self.metadata_status_label.setText(
-            "MusicBrainzに問い合わせています…"
+            f"MusicBrainzに問い合わせています…（Disc ID: {disc_id}）"
         )
 
         worker = MetadataLookupWorker(disc_id, parent=self)
@@ -856,17 +858,34 @@ class MainWindow(QMainWindow):
         self._metadata_lookup_worker = worker
         worker.start()
 
+    def _disc_id_suffix(self) -> str:
+        """検索に使ったDisc IDをステータス表示に添えるための接尾辞。
+
+        Disc IDはCDのプレス版（工場・マスタリング）ごとに異なるため、
+        検索結果（1件のみ一致・0件・複数件のいずれも）がユーザーの
+        想定と異なる場合、どのDisc IDで検索したのかを明示することで、
+        MusicBrainzのWebサイト（``https://musicbrainz.org/cdtoc/<Disc
+        ID>``）で自分でも確認できるようにする。
+        """
+        if self._last_metadata_disc_id is None:
+            return ""
+
+        return f"（Disc ID: {self._last_metadata_disc_id}）"
+
     def _on_metadata_lookup_finished(self, result: LookupResult) -> None:
         self.metadata_lookup_button.setEnabled(True)
         self._metadata_lookup_worker = None
+        disc_id_suffix = self._disc_id_suffix()
 
         if not result.ok:
-            self.metadata_status_label.setText(f"検索エラー: {result.error}")
+            self.metadata_status_label.setText(
+                f"検索エラー: {result.error}{disc_id_suffix}"
+            )
             return
 
         if not result.candidates:
             self.metadata_status_label.setText(
-                "見つかりませんでした。手動で入力してください。"
+                f"見つかりませんでした{disc_id_suffix}。手動で入力してください。"
             )
             return
 
@@ -879,9 +898,10 @@ class MainWindow(QMainWindow):
             # 「他の版が検索されていないのではなく、Disc ID一致では
             # そもそも1件しか無かった」と誤解なく伝える。
             applied_message = (
-                "MusicBrainzで1件のみ一致しました（Disc IDはCDのプレス版"
-                "ごとに異なるため、同じ収録曲の他の版があっても通常は"
-                "ヒットしません）。内容を確認してください。"
+                f"MusicBrainzで1件のみ一致しました{disc_id_suffix}"
+                "（Disc IDはCDのプレス版ごとに異なるため、同じ収録曲の"
+                "他の版があっても通常はヒットしません）。"
+                "内容を確認してください。"
             )
         else:
             dialog = MusicBrainzCandidateDialog(result.candidates, parent=self)
@@ -889,7 +909,7 @@ class MainWindow(QMainWindow):
             if dialog.exec() != QDialog.DialogCode.Accepted:
                 self.metadata_status_label.setText(
                     f"{len(result.candidates)}件見つかりましたが、"
-                    "選択されませんでした。"
+                    f"選択されませんでした{disc_id_suffix}。"
                 )
                 return
 
@@ -898,13 +918,14 @@ class MainWindow(QMainWindow):
             if index is None:
                 self.metadata_status_label.setText(
                     f"{len(result.candidates)}件見つかりましたが、"
-                    "選択されませんでした。"
+                    f"選択されませんでした{disc_id_suffix}。"
                 )
                 return
 
             candidate = result.candidates[index]
             applied_message = (
-                "メタデータを反映しました。内容を確認してください。"
+                f"メタデータを反映しました{disc_id_suffix}。"
+                "内容を確認してください。"
             )
 
         if self._has_existing_metadata_input():
